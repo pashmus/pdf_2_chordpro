@@ -7,7 +7,7 @@
 {comment: Душа моя так ждёт Тебя}
 
 {start_of_grid: Intro:}
-| :E Esus4 | E/G# | E Esus4 | E/G#: | 3/4 162 BPM
+|: E Esus4 | E/G# | E Esus4 | E/G# :| 3/4 162 BPM
 {end_of_grid}
 
 {start_of_verse: 1.}
@@ -17,7 +17,8 @@
       [F#m7] Словом жизни буду т[H]вёрд…
 {end_of_verse}
 
-{start_of_chorus: Пре-припев 1:}
+{start_of_chorus: Пре-пр.1:}
+Пре-припев 1:
 Ты мой с[E]лавный Бог, скала спасенья,
 За[F#m7]щитник мой, надежный, [E/G#]верный!
 {end_of_chorus}
@@ -35,7 +36,8 @@
 Ты – всес[F#m7]ильный мой опл[H]от…
 {end_of_verse}
 
-{start_of_chorus: Пре-припев 2:}
+{start_of_chorus: Пре-пр.2:}
+Пре-припев 2:
 ОН мой с[E]лавный Бог, скала спасенья,
 За[F#m7]щитник мой, надежный, [E/G#]верный!
 {end_of_chorus}
@@ -71,7 +73,7 @@
 
 {start_of_grid: Instr.:}
 E Esus4 | E | C#m7 C#m6 | C#m7 |
-| :E/H Esus4/H | E/H | A2 | Hsus4(:H): |
+|: E/H Esus4/H | E/H | A2 | Hsus4(:H) :|
 {end_of_grid}
 
 {start_of_chorus: Tag:}

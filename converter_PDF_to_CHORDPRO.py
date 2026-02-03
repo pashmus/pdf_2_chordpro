@@ -290,8 +290,18 @@ class PdfToChordProConverter:
             # Check if it has colon
             return ('chorus', text.split(':')[0] + ":" if ":" in text else text)
 
-        if "Пре-пр" in text or "Пред-пр" in text:
-             return ('chorus', text.split(':')[0] + ":" if ":" in text else text)
+        # Rule 9: Normalize Pre-Chorus
+        keywords = ["Пре-припев", "Пред-припев", "Пре-пр", "Пред-пр"]
+        if any(k in text for k in keywords):
+             # If colon exists -> It's a Header -> Normalize to "Пре-пр.X:"
+             if ":" in text:
+                 num_match = re.search(r'(\d+)', text)
+                 num_suffix = f".{num_match.group(1)}" if num_match else "."
+                 normalized_label = f"Пре-пр{num_suffix}:"
+                 return ('chorus', normalized_label)
+             else:
+                 # If NO colon -> It's a Reference -> Return as is (no colon)
+                 return ('chorus', text)
 
         if "Bridge" in text or "Бридж" in text:
              return ('bridge', text.split(':')[0] + ":" if ":" in text else text)
@@ -320,6 +330,11 @@ class PdfToChordProConverter:
 
     def _process_comment_block(self, lines):
         output = []
+        # Warning for multiline comments
+        if len(lines) > 1:
+            line_preview = lines[0]['text'][:30] if lines else "Empty"
+            self.log(f"WARNING: Multiline comment block found ({len(lines)} lines): '{line_preview}...'")
+
         for line in lines:
             text = line['text'].strip()
             if text:
@@ -340,7 +355,10 @@ class PdfToChordProConverter:
 
             # Format
             formatted = clean_text.replace("//:", "|:").replace("://", ":|")
-            formatted = formatted.replace("|", " | ")
+            # Replace pipe with space-pipe-space only if NOT preceded by colon (start repeat) AND NOT followed by colon (end repeat)
+            formatted = re.sub(r'(?<!:)\|(?!:)', ' | ', formatted)
+            
+            # Normalize spaces around repeat signs
             formatted = re.sub(r'\|\:\s*', '|: ', formatted)
             formatted = re.sub(r'\s*\:\|', ' :|', formatted)
             formatted = re.sub(r'\s+', ' ', formatted).strip()
@@ -374,9 +392,27 @@ class PdfToChordProConverter:
             else:
                  is_ref = True
                  start_tag = f"{{comment: {label_text}}}"
+                 
+                 # Check if the block has more content (lines) than just the header
+                 content_lines_count = 0
+                 content_lines = []
+                 for l in block:
+                     if l['text'].strip() != label_text.strip():
+                         content_lines_count += 1
+                         content_lines.append(l['text'].strip())
+                 
+                 if content_lines_count > 0:
+                      self.log(f"WARNING: Reference/Comment block has extra content ({content_lines_count} lines) besides header: '{label_text}'")
 
         output.append(start_tag)
-        if is_ref: return output
+        
+        # If it is a reference, append extra lines as separate comments
+        if is_ref: 
+            if 'content_lines' in locals() and content_lines:
+                for line_text in content_lines:
+                    if line_text:
+                        output.append(f"{{comment: {line_text}}}")
+            return output
 
         i = 0
         while i < len(block):
