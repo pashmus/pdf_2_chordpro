@@ -1,7 +1,12 @@
 Found 3 PDF files.
 Processing 378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_1.pdf...
+WARNING [378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_1.pdf:Line 56]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
   Saved to output_cho\378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_1.cho
 Processing 378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_2.pdf...
+WARNING [378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_2.pdf:Line 56]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
   Saved to output_cho\378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_2.cho
 Processing 378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_3.pdf...
+WARNING [378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_3.pdf:Line 52]: Found visual break (Gap: 15.9) without keyword trigger at line 'E Esus4 E E Esus4 E...'. Starting new section.
+WARNING [378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_3.pdf:Line 60]: Found visual break (Gap: 11.5) without keyword trigger at line 'E Esus4 E E Esus4 E...'. Starting new section.
+WARNING [378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_3.pdf:Line 70]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
   Saved to output_cho\378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_3.cho

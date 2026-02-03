@@ -60,6 +60,8 @@
 
 {comment: Пр. 2}
 
+{comment: Это обычный текст}
+
 {start_of_bridge: Bridge:}
 //[E]:Изливаем [F#m7]пред Тобою
 [A2]Мы свои сердц[E]а.
@@ -69,6 +71,7 @@
 
 {start_of_grid: Instr.:}
 E Esus4 | E | C#m7 C#m6 | C#m7 |
+| :E/H Esus4/H | E/H | A2 | Hsus4(:H): |
 {end_of_grid}
 
 {comment: Bridge}
