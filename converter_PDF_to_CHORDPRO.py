@@ -924,6 +924,22 @@ class PdfToChordProConverter:
             c_center = (c['x0'] + c['x1']) / 2
             c_start = c['x0']
             
+            # Smart Space Injection: Check gap from previous char
+            if i > 0:
+                prev_c = lyric_chars[i-1]
+                dist = c_start - prev_c['x1']
+                # Threshold > 2.0 implies visual space. 
+                # Only insert if neither char is already a space.
+                if dist > 2.0 and c['char'] != ' ' and prev_c['char'] != ' ':
+                     # But where to insert? Before chords or after?
+                     # A space belongs to the text stream. 
+                     # If we insert it, we should probably check if any chords fit in that space gap too.
+                     # For simplicity, let's append space to result_str NOW.
+                     # Note: chords for THIS char (c) are inserted below.
+                     # If a chord was in the gap, it might have been skipped or belongs to 'before this char'.
+                     # Let's just add the space.
+                     result_str += " "
+
             # Check for chords that belong BEFORE this char
             # A chord belongs before this char if:
             # 1. It is the first char and chord is before it.
@@ -965,7 +981,8 @@ class PdfToChordProConverter:
         if delayed_chords:
              result_str += "".join(delayed_chords)
 
-        return indent_str + result_str.strip()
+        final_res = indent_str + result_str.strip()
+        return final_res.replace("//:", "||:").replace("://", ":||")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert PDF to ChordPro")
