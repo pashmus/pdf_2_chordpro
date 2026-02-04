@@ -591,7 +591,7 @@ class PdfToChordProConverter:
             while chord_queue and chord_queue[0]['x'] >= w_start and chord_queue[0]['x'] <= w_end:
                  c = chord_queue.pop(0)
                  rel = (c['x'] - w_start) / (w_end - w_start)
-                 idx = int(len(w_text) * rel)
+                 idx = int(round(len(w_text) * rel))
                  inserts.append((idx, c['text']))
 
             inserts.sort(key=lambda x: x[0], reverse=True)
