@@ -1,14 +1,15 @@
 Found 3 PDF files.
 Mode: CHARS (High Precision)
-Processing 378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_1.pdf...
-WARNING [378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_1.pdf:Line 56]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
-  Saved to output_cho\378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_1.cho
-Processing 378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_2.pdf...
-WARNING [378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_2.pdf:Line 56]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
-  Saved to output_cho\378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_2.cho
-Processing 378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_3.pdf...
-WARNING [378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_3.pdf:Line 60]: Found visual break (Gap: 11.5) without keyword trigger at line 'E      Esus4      E           ...'. Starting new section.
+Processing 378 Когда тьма.pdf...
+WARNING [378 Когда тьма.pdf:Line 61]: Found visual break (Gap: 11.6) without keyword trigger at line 'E      Esus4      E           ...'. Starting new section.
 WARNING: Reference/Comment block has extra content (1 lines) besides header: 'Пре-припев 2 – 2раза. (исполнять спокойно,'
-WARNING [378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_3.pdf:Line 71]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
+WARNING [378 Когда тьма.pdf:Line 72]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
 WARNING: Multiline comment block found (2 lines): 'Это обычный текст ...'
-  Saved to output_cho\378 Когда тьма со всех сторон (Душа моя так ждет Тебя)_3.cho
+WARNING [378 Когда тьма.pdf:Line 99]: Found visual break (Gap: 25.4) without keyword trigger at line 'А а  Н н Пп И и      о к Ш ш Ж...'. Starting new section.
+  Saved to output_cho\378 Когда тьма.cho
+Processing 378 Когда тьма_1.pdf...
+WARNING [378 Когда тьма_1.pdf:Line 56]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
+  Saved to output_cho\378 Когда тьма_1.cho
+Processing 378 Когда тьма_2.pdf...
+WARNING [378 Когда тьма_2.pdf:Line 56]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
+  Saved to output_cho\378 Когда тьма_2.cho

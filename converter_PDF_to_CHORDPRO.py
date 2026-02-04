@@ -577,6 +577,21 @@ class PdfToChordProConverter:
             line = block[i]
             is_chord = line['is_chord_line']
 
+            # Правило: строка с двоеточием и ключевым словом — это заголовок секции из PDF.
+            # Её нельзя выводить как обычный текст (иначе получится дублирование после {start_of_*: ...}),
+            # особенно если display-метка была нормализована/сокращена (например, "Пре-припев 1:" -> "Пре-пр.1:").
+            if label_text and (not is_chord):
+                raw_text = line['text'].strip()
+                if ":" in raw_text:
+                    detected_type, detected_label = self._classify_section_start(raw_text)
+                    if detected_type == block_type and detected_label and (":" in detected_label):
+                        # Если в этой же строке после двоеточия есть текст — оставляем только его.
+                        after_colon = raw_text.split(":", 1)[1].strip()
+                        if after_colon:
+                            output.append(after_colon)
+                        i += 1
+                        continue
+
             # Check if this line is just the header (e.g. "Пр.1:")
             if label_text and line['text'].strip() == label_text.strip():
                 i += 1
