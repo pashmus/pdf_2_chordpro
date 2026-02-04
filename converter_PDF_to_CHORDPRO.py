@@ -1,15 +1,17 @@
 import fitz  # PyMuPDF
 import re
 import os
+import argparse
 from pathlib import Path
 from database_manager import DatabaseManager
 
 class PdfToChordProConverter:
-    def __init__(self, input_dir="input_pdf", output_dir="output_cho"):
+    def __init__(self, input_dir="input_pdf", output_dir="output_cho", use_word_mode=False):
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.db_manager = DatabaseManager()
         self.parsing_report = []
+        self.use_word_mode = use_word_mode
 
     def log(self, message):
         self.parsing_report.append(message)
@@ -30,6 +32,10 @@ class PdfToChordProConverter:
             return
 
         self.log(f"Found {len(pdf_files)} PDF files.")
+        if self.use_word_mode:
+            self.log("Mode: WORDS (Classic)")
+        else:
+            self.log("Mode: CHARS (High Precision)")
 
         for pdf_file in pdf_files:
             try:
@@ -52,7 +58,7 @@ class PdfToChordProConverter:
         doc = fitz.open(pdf_path)
         all_lines = []
         for page in doc:
-            page_lines = self._extract_lines_from_page(page)
+            page_lines = self._extract_lines_from_page(page, pdf_path.name)
             all_lines.extend(page_lines)
 
         chordpro_content = self._convert_lines_to_chordpro(all_lines, metadata, pdf_path.name)
@@ -68,7 +74,45 @@ class PdfToChordProConverter:
             return int(match.group(1))
         return None
 
-    def _extract_lines_from_page(self, page):
+    def _extract_lines_from_page(self, page, filename=""):
+        # Dispatcher
+        if self.use_word_mode:
+            return self._extract_lines_from_page_words(page)
+        
+        # Try chars first
+        lines = self._extract_lines_from_page_chars(page)
+        
+        # Heuristic check: if we got lines but they seem empty of content or weird (e.g. no spaces found ever), fallback?
+        # For now, let's rely on the extraction logic itself to return None/Empty if it fails to find chars.
+        
+        # Check if we actually found distinct chars with spaces
+        has_spaces = False
+        total_chars = 0
+        for l in lines:
+            for c in l.get('chars', []):
+                total_chars += 1
+                if c['char'] == ' ': 
+                    has_spaces = True
+                    break
+            if has_spaces: break
+            
+        if lines and total_chars > 0 and not has_spaces:
+             # WARNING: Rawdict found chars but NO spaces. This might be a PDF where spaces are gaps.
+             # However, our logic relies on explicit spaces or gaps being detected. 
+             # If rawdict didn't report spaces, maybe we should fallback?
+             # Let's log a warning but proceed unless it's critical.
+             # Actually, the user said "if spaces are missing... fallback".
+             self.log(f"WARNING: No explicit space characters found in {filename} (rawdict). Falling back to WORDS mode.")
+             return self._extract_lines_from_page_words(page)
+
+        if not lines and total_chars == 0:
+             # Fallback if rawdict returns nothing (e.g. scanned image pdf?)
+             # Words mode might handle it better or at least fail same way.
+             return self._extract_lines_from_page_words(page)
+
+        return lines
+
+    def _extract_lines_from_page_words(self, page):
         words = page.get_text("words")
         TOLERANCE_Y = 3
         lines = {}
@@ -112,15 +156,129 @@ class PdfToChordProConverter:
 
         return processed_lines
 
+    def _extract_lines_from_page_chars(self, page):
+        raw = page.get_text("rawdict")
+        TOLERANCE_Y = 3
+        lines_map = {} # y -> list of char objects
+
+        blocks = raw.get("blocks", [])
+        for block in blocks:
+            if "lines" not in block: continue
+            for line in block["lines"]:
+                spans = line["spans"]
+                for span in spans:
+                    chars = span.get("chars", [])
+                    for c_obj in chars:
+                        c = c_obj["c"]
+                        bbox = c_obj["bbox"]
+                        # bbox: x0, y0, x1, y1
+                        
+                        y_center = (bbox[1] + bbox[3]) / 2
+                        
+                        # Find line
+                        found_y = None
+                        for y in lines_map.keys():
+                            if abs(y - y_center) < TOLERANCE_Y:
+                                found_y = y
+                                break
+                        
+                        if found_y is None:
+                            found_y = y_center
+                            lines_map[found_y] = []
+                        
+                        lines_map[found_y].append({
+                            'char': c,
+                            'x0': bbox[0],
+                            'y0': bbox[1],
+                            'x1': bbox[2],
+                            'y1': bbox[3]
+                        })
+
+        sorted_ys = sorted(lines_map.keys())
+        processed_lines = []
+        
+        for y in sorted_ys:
+            chars = sorted(lines_map[y], key=lambda c: c['x0'])
+            
+            # Reconstruct text
+            text_content = "".join([c['char'] for c in chars])
+            if not text_content.strip(): continue # Skip lines with only whitespace
+
+            # Reconstruct 'words' for compatibility with check_is_chord_line
+            # Simple splitter by space + Smart space detection based on distance
+            words_simulated = []
+            current_word_chars = []
+            
+            for i, c in enumerate(chars):
+                is_space = (c['char'] == ' ')
+                
+                # Check distance to previous char (Smart Space)
+                if i > 0 and not is_space:
+                    prev_c = chars[i-1]
+                    dist = c['x0'] - prev_c['x1']
+                    # Threshold: if gap is > 2.0 (heuristic), consider it a word break
+                    if dist > 2.0:
+                        # Flush word if exists
+                        if current_word_chars:
+                            wx0 = current_word_chars[0]['x0']
+                            wy0 = min(ch['y0'] for ch in current_word_chars)
+                            wx1 = current_word_chars[-1]['x1']
+                            wy1 = max(ch['y1'] for ch in current_word_chars)
+                            wtext = "".join(ch['char'] for ch in current_word_chars)
+                            words_simulated.append((wx0, wy0, wx1, wy1, wtext))
+                            current_word_chars = []
+
+                if is_space:
+                    if current_word_chars:
+                        # Flush word
+                        wx0 = current_word_chars[0]['x0']
+                        wy0 = min(ch['y0'] for ch in current_word_chars)
+                        wx1 = current_word_chars[-1]['x1']
+                        wy1 = max(ch['y1'] for ch in current_word_chars)
+                        wtext = "".join(ch['char'] for ch in current_word_chars)
+                        words_simulated.append((wx0, wy0, wx1, wy1, wtext))
+                        current_word_chars = []
+                else:
+                    current_word_chars.append(c)
+            
+            if current_word_chars:
+                wx0 = current_word_chars[0]['x0']
+                wy0 = min(ch['y0'] for ch in current_word_chars)
+                wx1 = current_word_chars[-1]['x1']
+                wy1 = max(ch['y1'] for ch in current_word_chars)
+                wtext = "".join(ch['char'] for ch in current_word_chars)
+                words_simulated.append((wx0, wy0, wx1, wy1, wtext))
+
+            if not chars: continue
+
+            line_top = min(c['y0'] for c in chars)
+            line_bottom = max(c['y1'] for c in chars)
+            line_height = line_bottom - line_top
+            
+            processed_lines.append({
+                'y': y,
+                'top': line_top,
+                'bottom': line_bottom,
+                'height': line_height,
+                'chars': chars,        # NEW field
+                'words': words_simulated, # Compatibility field
+                'text': text_content,
+                'is_chord_line': self._check_is_chord_line(words_simulated)
+            })
+            
+        return processed_lines
+
     def _check_is_chord_line(self, words):
         if not words: return False
         chord_count = 0
         chord_pattern = r'^[A-H](?:b|#)?(?:2|5|m|maj|min|dim|aug|sus|add)?(?:[0-9]{1,2})?(?:/[A-H](?:b|#)?)?$'
         total_tokens = len(words)
         for w in words:
-            clean = w[4].strip(".,;:()[]|")
+            # w is tuple (x0, y0, x1, y1, text, ...)
+            text_val = w[4]
+            clean = text_val.strip(".,;:()[]|")
             # Treat structural chars as valid for "chord line" detection
-            if re.match(chord_pattern, clean) or w[4].strip() in ["//:", "://", "|", "|:", ":|"]:
+            if re.match(chord_pattern, clean) or text_val.strip() in ["//:", "://", "|", "|:", ":|"]:
                 chord_count += 1
         return (chord_count / total_tokens) >= 0.4 if total_tokens > 0 else False
 
@@ -428,9 +586,6 @@ class PdfToChordProConverter:
                 if i + 1 < len(block):
                     next_line = block[i+1]
                     if not next_line['is_chord_line']:
-                        # Check if next line is actually a header for NEXT section?
-                        # No, flushing logic handles that boundaries.
-
                         # Merge
                         merged = self._merge_chords_and_lyrics(line, next_line, label_text)
                         output.append(merged)
@@ -448,20 +603,10 @@ class PdfToChordProConverter:
                 # Strip label if it's at the start
                 if label_text:
                      # Remove label from text
-                     # "1. Text" -> "Text"
-                     # "Пр.1: Text" -> "Text"
-
-                     # Also strip "End:" if we are in a 'tag' block but outputting 'Tag:'
-                     # (Handled by generic stripper below if label_text was passed correctly)
-
-                     # The label_text passed here is "End:" (from classify).
-
-                     # Clean text logic:
                      clean_text = text.strip()
                      if clean_text.startswith(label_text):
                           text = text.replace(label_text, "", 1).strip()
                      elif label_text == "Tag:" and clean_text.startswith("End:"):
-                          # Fallback if somehow mismatched?
                           text = text.replace("End:", "", 1).strip()
 
                 output.append(text)
@@ -485,47 +630,41 @@ class PdfToChordProConverter:
         return None
 
     def _merge_chords_and_lyrics(self, chord_line, lyric_line, label_to_strip=""):
-        # Convert tuples to lists to allow modification
+        # Dispatch to appropriate method
+        if lyric_line and 'chars' in lyric_line:
+            return self._merge_using_chars(chord_line, lyric_line, label_to_strip)
+        else:
+            return self._merge_using_words(chord_line, lyric_line, label_to_strip)
+
+    def _merge_using_words(self, chord_line, lyric_line, label_to_strip=""):
+        # Original logic (Legacy)
         chord_words = [list(w) for w in chord_line['words']] if chord_line else []
         lyric_words = [list(w) for w in lyric_line['words']] if lyric_line else []
 
-        # Pre-process repeat signs in raw text (before merge)
-        # Convert //: to ||: and :// to :|| in both lyrics and chords
         for w in lyric_words:
             w[4] = w[4].replace("//:", "||:").replace("://", ":||")
-        
         for w in chord_words:
             w[4] = w[4].replace("//:", "||:").replace("://", ":||")
 
-        # 1. Strip label from lyrics
+        # Strip label
         if lyric_line and label_to_strip:
-             # Heuristic: Drop words until we pass the length of label
              full_text = lyric_line['text']
-             # Ensure we strip ignoring case and potential suffix
              label_clean = label_to_strip.strip()
-
-             # Also try stripping "End:" if it's there but not in label_to_strip
-             # (This handles the case where "End:" is in text but label was "Tag:")
              if full_text.strip().startswith("End:"):
                  full_text = full_text.replace("End:", "", 1).strip()
-                 # We need to adjust lyric_words too.
                  if lyric_words and "End" in lyric_words[0][4]:
-                      lyric_words = lyric_words[1:] # Rough removal
-
+                      lyric_words = lyric_words[1:]
              if full_text.strip().startswith(label_clean):
-                  # This is tricky with raw words.
-                  # Simple: if first word is the label (e.g. "1."), drop it.
                   if lyric_words and (lyric_words[0][4].strip() == label_clean or label_clean in lyric_words[0][4]):
                        lyric_words = lyric_words[1:]
                   elif lyric_words and len(lyric_words) > 1 and (lyric_words[0][4] + lyric_words[1][4]).replace(" ", "") == label_clean.replace(" ", ""):
                        lyric_words = lyric_words[2:]
 
-        # 2. Indentation (Rule 14)
+        # Indentation
         indent_spaces = 0
         if chord_words and lyric_words:
             first_chord_x = chord_words[0][0]
             first_lyric_x = lyric_words[0][0]
-
             if first_chord_x < first_lyric_x - 2.0:
                 chord_text = chord_words[0][4]
                 l = len(chord_text.strip("[]()|"))
@@ -535,10 +674,9 @@ class PdfToChordProConverter:
                 elif l == 4: indent_spaces = 6
                 elif l == 5: indent_spaces = 7
                 else: indent_spaces = 8
-
         indent_str = " " * indent_spaces
 
-        # 3. Events
+        # Events
         events = []
         delayed_chords = []
 
@@ -546,12 +684,10 @@ class PdfToChordProConverter:
             events.append({'type': 'lyric', 'x': w[0], 'end': w[2], 'text': w[4]})
 
         chord_pattern = r'^[A-H](?:b|#)?(?:2|5|m|maj|min|dim|aug|sus|add)?(?:[0-9]{1,2})?(?:/[A-H](?:b|#)?)?$'
-
         for w in chord_words:
             raw_text = w[4]
             x = w[0]
             formatted_chord = ""
-
             if "(:" in raw_text:
                 parts = raw_text.split("(:")
                 first = parts[0]
@@ -564,7 +700,6 @@ class PdfToChordProConverter:
                  else: formatted_chord = f"[{raw_text}]"
             else:
                  formatted_chord = f"[{raw_text}]"
-
             events.append({'type': 'chord', 'x': x, 'text': formatted_chord})
 
         events.sort(key=lambda e: e['x'])
@@ -609,6 +744,218 @@ class PdfToChordProConverter:
 
         return indent_str + combined_text.strip()
 
+    def _merge_using_chars(self, chord_line, lyric_line, label_to_strip=""):
+        # NEW logic using character precision
+        
+        # Prepare chords
+        chord_words = [list(w) for w in chord_line['words']] if chord_line else []
+        for w in chord_words:
+            w[4] = w[4].replace("//:", "||:").replace("://", ":||")
+
+        chord_events = []
+        delayed_chords = []
+        chord_pattern = r'^[A-H](?:b|#)?(?:2|5|m|maj|min|dim|aug|sus|add)?(?:[0-9]{1,2})?(?:/[A-H](?:b|#)?)?$'
+
+        for w in chord_words:
+            raw_text = w[4]
+            x = w[0]
+            formatted_chord = ""
+            if "(:" in raw_text:
+                parts = raw_text.split("(:")
+                first = parts[0]
+                second = parts[1].replace(")", "")
+                if first: formatted_chord = f"[(1.][{first})]"
+                else: formatted_chord = "[(1.]"
+                delayed_chords.append(f"[(2.][{second})]")
+            elif re.match(chord_pattern, raw_text.strip(".,;:()[]|")):
+                 if raw_text.startswith("(") and raw_text.endswith(")"): formatted_chord = f"[{raw_text}]"
+                 else: formatted_chord = f"[{raw_text}]"
+            else:
+                 formatted_chord = f"[{raw_text}]"
+            chord_events.append({'x': x, 'text': formatted_chord})
+        
+        chord_events.sort(key=lambda e: e['x'])
+
+        # Indentation (same logic)
+        indent_spaces = 0
+        if chord_words and lyric_line and lyric_line['chars']:
+            first_chord_x = chord_words[0][0]
+            first_lyric_x = lyric_line['chars'][0]['x0']
+            if first_chord_x < first_lyric_x - 2.0:
+                 chord_text = chord_words[0][4]
+                 l = len(chord_text.strip("[]()|"))
+                 if l == 1: indent_spaces = 2
+                 elif l == 2: indent_spaces = 4
+                 elif l == 3: indent_spaces = 5
+                 elif l == 4: indent_spaces = 6
+                 elif l == 5: indent_spaces = 7
+                 else: indent_spaces = 8
+        indent_str = " " * indent_spaces
+
+        if not lyric_line:
+             line_str = indent_str + " ".join([c['text'] for c in chord_events])
+             if delayed_chords: line_str += "".join(delayed_chords)
+             return line_str
+
+        # Flatten lyrics chars
+        # We need to filter out label if needed
+        # Since we are working with raw chars, stripping label is harder.
+        # But we constructed 'words' in lines too, we can use heuristic:
+        # If 'text' starts with label, just drop N chars.
+        
+        lyric_chars = lyric_line['chars']
+        
+        if label_to_strip:
+             full_text = lyric_line['text']
+             label_clean = label_to_strip.strip()
+             
+             # Similar logic to words mode but on text
+             chars_to_skip = 0
+             text_to_check = full_text.strip()
+             prefix_found = False
+             
+             if text_to_check.startswith("End:"):
+                  prefix_found = True
+                  # Find length of "End:" in chars? 
+                  # Simple approach: rebuild text and skip
+                  # This assumes chars are in order.
+                  pass 
+
+             # Simpler: just use full_text to decide how many chars to skip from start
+             if full_text.lstrip().startswith(label_clean):
+                 # Find index in full_text where label ends
+                 start_idx = full_text.find(label_clean)
+                 end_idx = start_idx + len(label_clean)
+                 # Map this to char list. Chars might have spaces or not (spaces are chars now!)
+                 # We need to find the char index that corresponds to text index.
+                 
+                 # Let's count
+                 current_len = 0
+                 cut_index = 0
+                 for i, c in enumerate(lyric_chars):
+                     current_len += len(c['char'])
+                     if current_len > end_idx:
+                         cut_index = i + 1
+                         break
+                 
+                 # Refine: if the chars are just "1", ".", " " -> skip them
+                 # It's safer to skip chars until we pass the label
+                 
+                 # Actually, let's just use the 'words' stripping logic to know WHICH words to skip, 
+                 # then map words back to chars? No, too complex.
+                 
+                 # Let's stick to X coordinate!
+                 # If we detected a label, we know its text.
+                 # Any char that is "part of the label" should be skipped.
+                 # Label is usually at the start.
+                 
+                 # Scan chars from start
+                 match_chars = list(label_clean.replace(" ", ""))
+                 # This is getting complicated with spaces.
+                 
+                 # Fallback: if label present, skip first few chars that look like label
+                 pass
+
+        # For now, let's assume label stripping is less critical for the specific char positioning 
+        # or implement a simple X-based skip if needed.
+        # But wait, if we don't strip label, we might insert chords into the label!
+        # The user wants "1. Lyrics [Am]".
+        
+        # Let's try to match text prefix.
+        if label_to_strip:
+             clean_label = label_to_strip.strip()
+             # Try to match chars at start
+             matched_idx = -1
+             temp_str = ""
+             for i, c in enumerate(lyric_chars):
+                 if c['char'].strip() == "": continue
+                 temp_str += c['char']
+                 if temp_str == clean_label or temp_str.startswith(clean_label):
+                     matched_idx = i
+                     break
+                 # loose match?
+                 if len(temp_str) > len(clean_label) + 5: break
+             
+             if matched_idx >= 0:
+                 lyric_chars = lyric_chars[matched_idx+1:]
+
+
+        # Merge Logic
+        result_str = ""
+        
+        # We interleave chords into char stream
+        # Algorithm:
+        # iterate chars. For each char, check if any chord should be placed BEFORE it.
+        # Position logic:
+        # If chord.x < char.center -> place before char
+        # If chord.x >= char.center -> place after char (which is before next char)
+        
+        # Actually, standard logic: place chord at specific point.
+        # We iterate chords and insert them into text.
+        
+        current_char_idx = 0
+        
+        # We can reconstruct text by appending chars and chords
+        
+        # Add a sentinel char at the end (infinity X)
+        lyric_chars_with_sentinel = lyric_chars + [{'x0': 999999, 'x1': 999999, 'char': ''}]
+        
+        last_x_end = 0
+        if lyric_chars: last_x_end = lyric_chars[0]['x0']
+
+        processed_chords = [False] * len(chord_events)
+        
+        for i, c in enumerate(lyric_chars):
+            c_center = (c['x0'] + c['x1']) / 2
+            c_start = c['x0']
+            
+            # Check for chords that belong BEFORE this char
+            # A chord belongs before this char if:
+            # 1. It is the first char and chord is before it.
+            # 2. Chord is between prev char and this char.
+            # 3. Chord is ON this char but in left half.
+            
+            # Find all chords that haven't been processed and should appear here
+            for ch_i, chord in enumerate(chord_events):
+                if processed_chords[ch_i]: continue
+                
+                should_insert = False
+                
+                # If chord is way before (e.g. indentation or previous space gap)
+                if chord['x'] < c_start:
+                    should_insert = True
+                    
+                # If chord is on the char
+                elif chord['x'] >= c_start and chord['x'] < c['x1']:
+                    # Check center
+                    if chord['x'] < c_center:
+                         should_insert = True
+                    # else: wait for next iteration (insert after) or next char?
+                    # If we don't insert now, we will visit this chord again on next char?
+                    # No, if it's in right half, it should be inserted AFTER this char.
+                    # which effectively means BEFORE next char.
+                    # So we just skip it now.
+                
+                if should_insert:
+                    result_str += chord['text']
+                    processed_chords[ch_i] = True
+            
+            result_str += c['char']
+            
+        # Append remaining chords (at the end of line)
+        for ch_i, chord in enumerate(chord_events):
+            if not processed_chords[ch_i]:
+                result_str += chord['text']
+
+        if delayed_chords:
+             result_str += "".join(delayed_chords)
+
+        return indent_str + result_str.strip()
+
 if __name__ == "__main__":
-    converter = PdfToChordProConverter()
+    parser = argparse.ArgumentParser(description="Convert PDF to ChordPro")
+    parser.add_argument("-w", "--words-mode", action="store_true", help="Use legacy word-level parsing (no space detection)")
+    args = parser.parse_args()
+
+    converter = PdfToChordProConverter(use_word_mode=args.words_mode)
     converter.process_all()
