@@ -485,8 +485,17 @@ class PdfToChordProConverter:
         return None
 
     def _merge_chords_and_lyrics(self, chord_line, lyric_line, label_to_strip=""):
-        chord_words = chord_line['words'] if chord_line else []
-        lyric_words = lyric_line['words'] if lyric_line else []
+        # Convert tuples to lists to allow modification
+        chord_words = [list(w) for w in chord_line['words']] if chord_line else []
+        lyric_words = [list(w) for w in lyric_line['words']] if lyric_line else []
+
+        # Pre-process repeat signs in raw text (before merge)
+        # Convert //: to ||: and :// to :|| in both lyrics and chords
+        for w in lyric_words:
+            w[4] = w[4].replace("//:", "||:").replace("://", ":||")
+        
+        for w in chord_words:
+            w[4] = w[4].replace("//:", "||:").replace("://", ":||")
 
         # 1. Strip label from lyrics
         if lyric_line and label_to_strip:
