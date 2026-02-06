@@ -11,44 +11,52 @@ class PdfToChordProConverter:
         self.output_dir = Path(output_dir)
         self.db_manager = DatabaseManager()
         self.parsing_report = []
+        self.rule14_report = []  # New list for Rule 14 report
         self.use_word_mode = use_word_mode
 
     def log(self, message):
         self.parsing_report.append(message)
         print(message)
 
+    def log_rule14(self, message):
+        self.rule14_report.append(message)
+
     def save_report(self):
         with open("parsing_report.txt", "w", encoding="utf-8") as f:
             f.write("\n".join(self.parsing_report))
 
+        if self.rule14_report:
+            with open("rule14_report.txt", "w", encoding="utf-8") as f:
+                f.write("\n".join(self.rule14_report))
+
     def process_all(self):
         if not self.input_dir.exists():
-            self.log(f"Directory {self.input_dir} does not exist.")
+            self.log(f"Директория {self.input_dir} не найдена.")
             return
 
         pdf_files = list(self.input_dir.glob("*.pdf"))
         if not pdf_files:
-            self.log(f"No PDF files found in {self.input_dir}")
+            self.log(f"В директории {self.input_dir} не найдено PDF файлов.")
             return
 
-        self.log(f"Found {len(pdf_files)} PDF files.")
+        self.log(f"Найдено {len(pdf_files)} PDF файлов.")
         if self.use_word_mode:
-            self.log("Mode: WORDS (Classic)")
+            self.log("Режим: WORDS (Классический)")
         else:
-            self.log("Mode: CHARS (High Precision)")
+            self.log("Режим: CHARS (Высокая точность)")
 
         for pdf_file in pdf_files:
             try:
                 self.process_file(pdf_file)
             except Exception as e:
-                self.log(f"ERROR processing {pdf_file.name}: {e}")
+                self.log(f"ОШИБКА обработки {pdf_file.name}: {e}")
                 import traceback
                 traceback.print_exc()
 
         self.save_report()
 
     def process_file(self, pdf_path):
-        self.log(f"Processing {pdf_path.name}...")
+        self.log(f"Обработка {pdf_path.name}...")
 
         song_num = self._extract_song_number(pdf_path.name)
         metadata = {}
@@ -66,7 +74,7 @@ class PdfToChordProConverter:
         output_path = self.output_dir / (pdf_path.stem + ".cho")
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(chordpro_content)
-        self.log(f"  Saved to {output_path}")
+        self.log(f"  Сохранено в {output_path}")
 
     def _extract_song_number(self, filename):
         match = re.match(r'^(\d+)', filename)
@@ -78,31 +86,31 @@ class PdfToChordProConverter:
         # Dispatcher
         if self.use_word_mode:
             return self._extract_lines_from_page_words(page)
-        
+
         # Try chars first
         lines = self._extract_lines_from_page_chars(page)
-        
+
         # Heuristic check: if we got lines but they seem empty of content or weird (e.g. no spaces found ever), fallback?
         # For now, let's rely on the extraction logic itself to return None/Empty if it fails to find chars.
-        
+
         # Check if we actually found distinct chars with spaces
         has_spaces = False
         total_chars = 0
         for l in lines:
             for c in l.get('chars', []):
                 total_chars += 1
-                if c['char'] == ' ': 
+                if c['char'] == ' ':
                     has_spaces = True
                     break
             if has_spaces: break
-            
+
         if lines and total_chars > 0 and not has_spaces:
              # WARNING: Rawdict found chars but NO spaces. This might be a PDF where spaces are gaps.
-             # However, our logic relies on explicit spaces or gaps being detected. 
+             # However, our logic relies on explicit spaces or gaps being detected.
              # If rawdict didn't report spaces, maybe we should fallback?
              # Let's log a warning but proceed unless it's critical.
              # Actually, the user said "if spaces are missing... fallback".
-             self.log(f"WARNING: No explicit space characters found in {filename} (rawdict). Falling back to WORDS mode.")
+             self.log(f"--WARNING--: В файле {filename} не найдены явные пробелы (rawdict). Переключение в режим WORDS.")
              return self._extract_lines_from_page_words(page)
 
         if not lines and total_chars == 0:
@@ -172,20 +180,20 @@ class PdfToChordProConverter:
                         c = c_obj["c"]
                         bbox = c_obj["bbox"]
                         # bbox: x0, y0, x1, y1
-                        
+
                         y_center = (bbox[1] + bbox[3]) / 2
-                        
+
                         # Find line
                         found_y = None
                         for y in lines_map.keys():
                             if abs(y - y_center) < TOLERANCE_Y:
                                 found_y = y
                                 break
-                        
+
                         if found_y is None:
                             found_y = y_center
                             lines_map[found_y] = []
-                        
+
                         lines_map[found_y].append({
                             'char': c,
                             'x0': bbox[0],
@@ -196,10 +204,10 @@ class PdfToChordProConverter:
 
         sorted_ys = sorted(lines_map.keys())
         processed_lines = []
-        
+
         for y in sorted_ys:
             chars = sorted(lines_map[y], key=lambda c: c['x0'])
-            
+
             # Reconstruct text
             text_content = "".join([c['char'] for c in chars])
             if not text_content.strip(): continue # Skip lines with only whitespace
@@ -208,10 +216,10 @@ class PdfToChordProConverter:
             # Simple splitter by space + Smart space detection based on distance
             words_simulated = []
             current_word_chars = []
-            
+
             for i, c in enumerate(chars):
                 is_space = (c['char'] == ' ')
-                
+
                 # Check distance to previous char (Smart Space)
                 if i > 0 and not is_space:
                     prev_c = chars[i-1]
@@ -240,7 +248,7 @@ class PdfToChordProConverter:
                         current_word_chars = []
                 else:
                     current_word_chars.append(c)
-            
+
             if current_word_chars:
                 wx0 = current_word_chars[0]['x0']
                 wy0 = min(ch['y0'] for ch in current_word_chars)
@@ -254,7 +262,7 @@ class PdfToChordProConverter:
             line_top = min(c['y0'] for c in chars)
             line_bottom = max(c['y1'] for c in chars)
             line_height = line_bottom - line_top
-            
+
             processed_lines.append({
                 'y': y,
                 'top': line_top,
@@ -265,7 +273,7 @@ class PdfToChordProConverter:
                 'text': text_content,
                 'is_chord_line': self._check_is_chord_line(words_simulated)
             })
-            
+
         return processed_lines
 
     def _check_is_chord_line(self, words):
@@ -283,6 +291,8 @@ class PdfToChordProConverter:
         return (chord_count / total_tokens) >= 0.4 if total_tokens > 0 else False
 
     def _convert_lines_to_chordpro(self, lines, metadata, filename):
+        self.current_filename = filename # Store for reports
+        self.current_song_rule14_sections = [] # Reset for new song
         output = []
 
         # Headers
@@ -396,7 +406,7 @@ class PdfToChordProConverter:
             elif visual_break and not keyword_type:
                 new_section_type = 'unknown'
                 new_label = ""
-                self.log(f"WARNING [{filename}:Line {i}]: Found visual break (Gap: {gap:.1f}) without keyword trigger at line '{text[:30]}...'. Starting new section.")
+                self.log(f"--WARNING-- [{filename}:Строка {i}]: Обнаружен визуальный разрыв (Gap: {gap:.1f}) без ключевого слова в строке '{text[:30]}...'. Начало новой секции.")
 
             # Case C: Only Keyword -> New section + Warning
             elif keyword_type and not visual_break:
@@ -404,7 +414,7 @@ class PdfToChordProConverter:
                 new_label = keyword_label
                 # Don't warn on very first line or if it looks like start of file logic might apply
                 if i > 0:
-                     self.log(f"WARNING [{filename}:Line {i+1}]: Found keyword '{text[:30]}...' without visual break (Gap: {gap:.1f}). Check formatting.")
+                     self.log(f"--WARNING-- [{filename}:Строка {i+1}]: Найдено ключевое слово '{text[:30]}...' без визуального разрыва (Gap: {gap:.1f}). Проверьте форматирование.")
 
             if new_section_type:
                 # Close previous section
@@ -433,6 +443,12 @@ class PdfToChordProConverter:
         # Flush last section
         if current_section_type:
              output.extend(self._flush_section(current_section_type, current_label, current_section_lines))
+
+        # Rule 14 Report generation for this file
+        if self.current_song_rule14_sections:
+             title = Path(filename).stem
+             report_msg = f"{'-'*30}\nПесня: {title}\n" + "\n\n".join(self.current_song_rule14_sections)
+             self.log_rule14(report_msg)
 
         return "\n".join(output)
 
@@ -491,7 +507,7 @@ class PdfToChordProConverter:
         # Warning for multiline comments
         if len(lines) > 1:
             line_preview = lines[0]['text'][:30] if lines else "Empty"
-            self.log(f"WARNING: Multiline comment block found ({len(lines)} lines): '{line_preview}...'")
+            self.log(f"--WARNING--: Обнаружен многострочный блок комментария ({len(lines)} строк): '{line_preview}...'")
 
         for line in lines:
             text = line['text'].strip()
@@ -515,7 +531,7 @@ class PdfToChordProConverter:
             formatted = clean_text.replace("//:", "|:").replace("://", ":|")
             # Replace pipe with space-pipe-space only if NOT preceded by colon (start repeat) AND NOT followed by colon (end repeat)
             formatted = re.sub(r'(?<!:)\|(?!:)', ' | ', formatted)
-            
+
             # Normalize spaces around repeat signs
             formatted = re.sub(r'\|\:\s*', '|: ', formatted)
             formatted = re.sub(r'\s*\:\|', ' :|', formatted)
@@ -549,7 +565,7 @@ class PdfToChordProConverter:
             else:
                  is_ref = True
                  start_tag = f"{{comment: {label_text}}}"
-                 
+
                  # Check if the block has more content (lines) than just the header
                  content_lines_count = 0
                  content_lines = []
@@ -557,14 +573,14 @@ class PdfToChordProConverter:
                      if l['text'].strip() != label_text.strip():
                          content_lines_count += 1
                          content_lines.append(l['text'].strip())
-                 
+
                  if content_lines_count > 0:
-                      self.log(f"WARNING: Reference/Comment block has extra content ({content_lines_count} lines) besides header: '{label_text}'")
+                      self.log(f"--WARNING--: Блок Reference/Comment содержит дополнительный контент ({content_lines_count} строк) помимо заголовка: '{label_text}'")
 
         output.append(start_tag)
-        
+
         # If it is a reference, append extra lines as separate comments
-        if is_ref: 
+        if is_ref:
             if 'content_lines' in locals() and content_lines:
                 for line_text in content_lines:
                     if line_text:
@@ -572,7 +588,7 @@ class PdfToChordProConverter:
             return output
 
         # --- Rule 14: Calculate Block Indentation ---
-        block_indent = self._calculate_block_indent(block)
+        block_indent = self._calculate_block_indent(block, filename=self.current_filename if hasattr(self, 'current_filename') else "")
         # --------------------------------------------
 
         i = 0
@@ -635,9 +651,13 @@ class PdfToChordProConverter:
                 i += 1
 
         output.append(end_tag)
+        
+        if block_indent > 0:
+            self.current_song_rule14_sections.append("\n".join(output))
+
         return output
 
-    def _calculate_block_indent(self, block):
+    def _calculate_block_indent(self, block, filename=""):
         max_indent = 0
         i = 0
         while i < len(block):
@@ -655,17 +675,17 @@ class PdfToChordProConverter:
     def _get_line_indent_requirement(self, chord_line, lyric_line):
         # Helper to calculate indent if leading chord exists
         if not chord_line or not lyric_line: return 0
-        
+
         c_words = chord_line.get('words', [])
         l_words = lyric_line.get('words', [])
-        
+
         if not c_words: return 0
-        
+
         first_chord_x = c_words[0][0]
-        
+
         # Determine first lyric text X (ignoring spaces)
         first_lyric_x = None
-        
+
         if 'chars' in lyric_line and lyric_line['chars']:
              for c in lyric_line['chars']:
                  if c['char'].strip(): # Found non-space char
@@ -674,7 +694,7 @@ class PdfToChordProConverter:
         elif l_words:
              # Words usually don't contain leading spaces if parsed by pymupdf words
              first_lyric_x = l_words[0][0]
-        
+
         if first_lyric_x is None:
              return 0
 
@@ -688,7 +708,7 @@ class PdfToChordProConverter:
             elif l == 4: return 6
             elif l == 5: return 7
             else: return 8
-            
+
         return 0
 
     def _detect_key_global(self, lines):
@@ -785,13 +805,13 @@ class PdfToChordProConverter:
              # Take the first chord (leading)
              c = chord_queue.pop(0)
              combined_text += c['text']
-             
+
              # Pad to reach block_indent
              # We assume block_indent corresponds to column index
              current_len = len(combined_text)
              if current_len < block_indent:
                  combined_text += " " * (block_indent - current_len)
-             
+
              if not combined_text.endswith(" "): combined_text += " "
 
         for w in lyric_words:
@@ -831,7 +851,7 @@ class PdfToChordProConverter:
 
     def _merge_using_chars(self, chord_line, lyric_line, label_to_strip="", block_indent=0):
         # NEW logic using character precision
-        
+
         # Prepare chords
         chord_words = [list(w) for w in chord_line['words']] if chord_line else []
         for w in chord_words:
@@ -858,7 +878,7 @@ class PdfToChordProConverter:
             else:
                  formatted_chord = f"[{raw_text}]"
             chord_events.append({'x': x, 'text': formatted_chord})
-        
+
         chord_events.sort(key=lambda e: e['x'])
 
         if not lyric_line:
@@ -868,7 +888,7 @@ class PdfToChordProConverter:
 
         # Flatten lyrics chars
         lyric_chars = lyric_line['chars']
-        
+
         # Skip leading spaces from the char stream to avoid double indentation
         # We find the first non-space char to define where "text" actually starts
         start_idx = 0
@@ -879,9 +899,9 @@ class PdfToChordProConverter:
         else:
             # All spaces?
             if lyric_chars: start_idx = len(lyric_chars)
-            
+
         lyric_chars = lyric_chars[start_idx:]
-        
+
         # Label stripping logic (simplified/skipped as per original code structure)
         if label_to_strip:
              clean_label = label_to_strip.strip()
@@ -894,7 +914,7 @@ class PdfToChordProConverter:
                      matched_idx = i
                      break
                  if len(temp_str) > len(clean_label) + 5: break
-             
+
              if matched_idx >= 0:
                  lyric_chars = lyric_chars[matched_idx+1:]
                  # Also skip any immediate whitespace after the label
@@ -915,26 +935,26 @@ class PdfToChordProConverter:
              final_res = (" " * block_indent) + result_str
              if delayed_chords: final_res += "".join(delayed_chords)
              return final_res.replace("//:", "||:").replace("://", ":||")
-        
+
         for i, c in enumerate(lyric_chars):
             c_center = (c['x0'] + c['x1']) / 2
             c_start = c['x0']
-            
+
             # Insert chords that are before this char
             for ch_i, chord in enumerate(chord_events):
                 if processed_chords[ch_i]: continue
-                
+
                 should_insert = False
                 if chord['x'] < c_start:
                     should_insert = True
                 elif chord['x'] >= c_start and chord['x'] < c['x1']:
                     if chord['x'] < c_center:
                          should_insert = True
-                
+
                 if should_insert:
                     result_str += chord['text']
                     processed_chords[ch_i] = True
-            
+
             # Insert Indent just before the first actual char
             if not indent_inserted:
                 result_str += " " * block_indent
@@ -948,7 +968,7 @@ class PdfToChordProConverter:
                      result_str += " "
 
             result_str += c['char']
-            
+
         # Append remaining chords
         for ch_i, chord in enumerate(chord_events):
             if not processed_chords[ch_i]:
@@ -956,7 +976,7 @@ class PdfToChordProConverter:
 
         if delayed_chords:
              result_str += "".join(delayed_chords)
-        
+
         # Fallback if loop didn't run (unlikely given check above)
         if not indent_inserted:
              result_str = (" " * block_indent) + result_str

@@ -1,19 +1,19 @@
-Found 4 PDF files.
-Mode: CHARS (High Precision)
-Processing 378 Когда тьма (Пример).pdf...
-WARNING [378 Когда тьма (Пример).pdf:Line 57]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
-  Saved to output_cho\378 Когда тьма (Пример).cho
-Processing 378 Когда тьма.pdf...
-WARNING [378 Когда тьма.pdf:Line 85]: Found visual break (Gap: 11.6) without keyword trigger at line 'E      Esus4      E           ...'. Starting new section.
-WARNING: Reference/Comment block has extra content (1 lines) besides header: 'Пре-припев 2 – 2раза. (исполнять спокойно,'
-WARNING [378 Когда тьма.pdf:Line 96]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
-WARNING: Multiline comment block found (2 lines): 'Это обычный текст ...'
-WARNING [378 Когда тьма.pdf:Line 123]: Found keyword 'Outro:  E Esus4 | E | C#m7 C#m...' without visual break (Gap: 0.0). Check formatting.
-WARNING [378 Когда тьма.pdf:Line 123]: Found visual break (Gap: 25.4) without keyword trigger at line 'А а  Н н Пп И и      о к Ш ш Ж...'. Starting new section.
-  Saved to output_cho\378 Когда тьма.cho
-Processing 378 Когда тьма_1.pdf...
-WARNING [378 Когда тьма_1.pdf:Line 56]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
-  Saved to output_cho\378 Когда тьма_1.cho
-Processing 378 Когда тьма_2.pdf...
-WARNING [378 Когда тьма_2.pdf:Line 56]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
-  Saved to output_cho\378 Когда тьма_2.cho
+Найдено 4 PDF файлов.
+Режим: CHARS (Высокая точность)
+Обработка 378 Когда тьма (Пример).pdf...
+--WARNING-- [378 Когда тьма (Пример).pdf:Строка 57]: Обнаружен визуальный разрыв (Gap: 14.6) без ключевого слова в строке 'Это обычный текст...'. Начало новой секции.
+  Сохранено в output_cho\378 Когда тьма (Пример).cho
+Обработка 378 Когда тьма.pdf...
+--WARNING-- [378 Когда тьма.pdf:Строка 85]: Обнаружен визуальный разрыв (Gap: 11.6) без ключевого слова в строке 'E      Esus4      E           ...'. Начало новой секции.
+--WARNING--: Блок Reference/Comment содержит дополнительный контент (1 строк) помимо заголовка: 'Пре-припев 2 – 2раза. (исполнять спокойно,'
+--WARNING-- [378 Когда тьма.pdf:Строка 96]: Обнаружен визуальный разрыв (Gap: 14.6) без ключевого слова в строке 'Это обычный текст...'. Начало новой секции.
+--WARNING--: Обнаружен многострочный блок комментария (2 строк): 'Это обычный текст ...'
+--WARNING-- [378 Когда тьма.pdf:Строка 123]: Найдено ключевое слово 'Outro:  E Esus4 | E | C#m7 C#m...' без визуального разрыва (Gap: 0.0). Проверьте форматирование.
+--WARNING-- [378 Когда тьма.pdf:Строка 123]: Обнаружен визуальный разрыв (Gap: 25.4) без ключевого слова в строке 'А а  Н н Пп И и      о к Ш ш Ж...'. Начало новой секции.
+  Сохранено в output_cho\378 Когда тьма.cho
+Обработка 378 Когда тьма_1.pdf...
+--WARNING-- [378 Когда тьма_1.pdf:Строка 56]: Обнаружен визуальный разрыв (Gap: 14.6) без ключевого слова в строке 'Это обычный текст...'. Начало новой секции.
+  Сохранено в output_cho\378 Когда тьма_1.cho
+Обработка 378 Когда тьма_2.pdf...
+--WARNING-- [378 Когда тьма_2.pdf:Строка 56]: Обнаружен визуальный разрыв (Gap: 14.6) без ключевого слова в строке 'Это обычный текст...'. Начало новой секции.
+  Сохранено в output_cho\378 Когда тьма_2.cho
