@@ -1,11 +1,15 @@
-Found 3 PDF files.
+Found 4 PDF files.
 Mode: CHARS (High Precision)
+Processing 378 Когда тьма (Пример).pdf...
+WARNING [378 Когда тьма (Пример).pdf:Line 57]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
+  Saved to output_cho\378 Когда тьма (Пример).cho
 Processing 378 Когда тьма.pdf...
-WARNING [378 Когда тьма.pdf:Line 61]: Found visual break (Gap: 11.6) without keyword trigger at line 'E      Esus4      E           ...'. Starting new section.
+WARNING [378 Когда тьма.pdf:Line 85]: Found visual break (Gap: 11.6) without keyword trigger at line 'E      Esus4      E           ...'. Starting new section.
 WARNING: Reference/Comment block has extra content (1 lines) besides header: 'Пре-припев 2 – 2раза. (исполнять спокойно,'
-WARNING [378 Когда тьма.pdf:Line 72]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
+WARNING [378 Когда тьма.pdf:Line 96]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.
 WARNING: Multiline comment block found (2 lines): 'Это обычный текст ...'
-WARNING [378 Когда тьма.pdf:Line 99]: Found visual break (Gap: 25.4) without keyword trigger at line 'А а  Н н Пп И и      о к Ш ш Ж...'. Starting new section.
+WARNING [378 Когда тьма.pdf:Line 123]: Found keyword 'Outro:  E Esus4 | E | C#m7 C#m...' without visual break (Gap: 0.0). Check formatting.
+WARNING [378 Когда тьма.pdf:Line 123]: Found visual break (Gap: 25.4) without keyword trigger at line 'А а  Н н Пп И и      о к Ш ш Ж...'. Starting new section.
   Saved to output_cho\378 Когда тьма.cho
 Processing 378 Когда тьма_1.pdf...
 WARNING [378 Когда тьма_1.pdf:Line 56]: Found visual break (Gap: 14.6) without keyword trigger at line 'Это обычный текст...'. Starting new section.

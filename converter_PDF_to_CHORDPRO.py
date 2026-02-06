@@ -539,7 +539,6 @@ class PdfToChordProConverter:
                  # Normalize 'End:' to 'Tag:' for output only
                  display_label = label_text
                  if display_label.startswith("End:"):
-                     display_label = "Tag:" + display_label[4:] # Or just "Tag:"?
                      display_label = "Tag:" # Standardize
 
                  if block_type == 'chorus': start_tag = f"{{start_of_chorus: {display_label}}}"; end_tag = "{end_of_chorus}"
@@ -572,6 +571,10 @@ class PdfToChordProConverter:
                         output.append(f"{{comment: {line_text}}}")
             return output
 
+        # --- Rule 14: Calculate Block Indentation ---
+        block_indent = self._calculate_block_indent(block)
+        # --------------------------------------------
+
         i = 0
         while i < len(block):
             line = block[i]
@@ -602,15 +605,15 @@ class PdfToChordProConverter:
                     next_line = block[i+1]
                     if not next_line['is_chord_line']:
                         # Merge
-                        merged = self._merge_chords_and_lyrics(line, next_line, label_text)
+                        merged = self._merge_chords_and_lyrics(line, next_line, label_text, block_indent)
                         output.append(merged)
                         i += 2
                         continue
                     else:
-                        output.append(self._merge_chords_and_lyrics(line, None))
+                        output.append(self._merge_chords_and_lyrics(line, None, block_indent=block_indent))
                         i += 1
                 else:
-                    output.append(self._merge_chords_and_lyrics(line, None))
+                    output.append(self._merge_chords_and_lyrics(line, None, block_indent=block_indent))
                     i += 1
             else:
                 # Lyric line
@@ -624,11 +627,69 @@ class PdfToChordProConverter:
                      elif label_text == "Tag:" and clean_text.startswith("End:"):
                           text = text.replace("End:", "", 1).strip()
 
+                # Apply block indent to lyric-only lines too
+                if block_indent > 0:
+                     text = (" " * block_indent) + text.strip()
+
                 output.append(text)
                 i += 1
 
         output.append(end_tag)
         return output
+
+    def _calculate_block_indent(self, block):
+        max_indent = 0
+        i = 0
+        while i < len(block):
+            line = block[i]
+            if line['is_chord_line'] and i + 1 < len(block):
+                next_line = block[i+1]
+                if not next_line['is_chord_line']:
+                    # Potential pairing
+                    indent = self._get_line_indent_requirement(line, next_line)
+                    if indent > max_indent:
+                        max_indent = indent
+            i += 1
+        return max_indent
+
+    def _get_line_indent_requirement(self, chord_line, lyric_line):
+        # Helper to calculate indent if leading chord exists
+        if not chord_line or not lyric_line: return 0
+        
+        c_words = chord_line.get('words', [])
+        l_words = lyric_line.get('words', [])
+        
+        if not c_words: return 0
+        
+        first_chord_x = c_words[0][0]
+        
+        # Determine first lyric text X (ignoring spaces)
+        first_lyric_x = None
+        
+        if 'chars' in lyric_line and lyric_line['chars']:
+             for c in lyric_line['chars']:
+                 if c['char'].strip(): # Found non-space char
+                     first_lyric_x = c['x0']
+                     break
+        elif l_words:
+             # Words usually don't contain leading spaces if parsed by pymupdf words
+             first_lyric_x = l_words[0][0]
+        
+        if first_lyric_x is None:
+             return 0
+
+        if first_chord_x < first_lyric_x - 2.0:
+            # Leading chord found
+            chord_text = c_words[0][4].strip("[]()|")
+            l = len(chord_text)
+            if l == 1: return 2
+            elif l == 2: return 4
+            elif l == 3: return 5
+            elif l == 4: return 6
+            elif l == 5: return 7
+            else: return 8
+            
+        return 0
 
     def _detect_key_global(self, lines):
         # Scan first 20 chord lines
@@ -644,14 +705,14 @@ class PdfToChordProConverter:
                      if match: return match.group(1)
         return None
 
-    def _merge_chords_and_lyrics(self, chord_line, lyric_line, label_to_strip=""):
+    def _merge_chords_and_lyrics(self, chord_line, lyric_line, label_to_strip="", block_indent=0):
         # Dispatch to appropriate method
         if lyric_line and 'chars' in lyric_line:
-            return self._merge_using_chars(chord_line, lyric_line, label_to_strip)
+            return self._merge_using_chars(chord_line, lyric_line, label_to_strip, block_indent)
         else:
-            return self._merge_using_words(chord_line, lyric_line, label_to_strip)
+            return self._merge_using_words(chord_line, lyric_line, label_to_strip, block_indent)
 
-    def _merge_using_words(self, chord_line, lyric_line, label_to_strip=""):
+    def _merge_using_words(self, chord_line, lyric_line, label_to_strip="", block_indent=0):
         # Original logic (Legacy)
         chord_words = [list(w) for w in chord_line['words']] if chord_line else []
         lyric_words = [list(w) for w in lyric_line['words']] if lyric_line else []
@@ -675,21 +736,13 @@ class PdfToChordProConverter:
                   elif lyric_words and len(lyric_words) > 1 and (lyric_words[0][4] + lyric_words[1][4]).replace(" ", "") == label_clean.replace(" ", ""):
                        lyric_words = lyric_words[2:]
 
-        # Indentation
-        indent_spaces = 0
+        # Check for leading chord
+        is_leading = False
         if chord_words and lyric_words:
             first_chord_x = chord_words[0][0]
             first_lyric_x = lyric_words[0][0]
             if first_chord_x < first_lyric_x - 2.0:
-                chord_text = chord_words[0][4]
-                l = len(chord_text.strip("[]()|"))
-                if l == 1: indent_spaces = 2
-                elif l == 2: indent_spaces = 4
-                elif l == 3: indent_spaces = 5
-                elif l == 4: indent_spaces = 6
-                elif l == 5: indent_spaces = 7
-                else: indent_spaces = 8
-        indent_str = " " * indent_spaces
+                is_leading = True
 
         # Events
         events = []
@@ -720,12 +773,26 @@ class PdfToChordProConverter:
         events.sort(key=lambda e: e['x'])
 
         if not lyric_words:
-             line_str = indent_str + " ".join([e['text'] for e in events if e['type']=='chord'])
+             line_str = (" " * block_indent) + " ".join([e['text'] for e in events if e['type']=='chord'])
              if delayed_chords: line_str += "".join(delayed_chords)
              return line_str
 
         combined_text = ""
         chord_queue = [e for e in events if e['type'] == 'chord']
+
+        # Handling leading chord specifically
+        if is_leading and chord_queue:
+             # Take the first chord (leading)
+             c = chord_queue.pop(0)
+             combined_text += c['text']
+             
+             # Pad to reach block_indent
+             # We assume block_indent corresponds to column index
+             current_len = len(combined_text)
+             if current_len < block_indent:
+                 combined_text += " " * (block_indent - current_len)
+             
+             if not combined_text.endswith(" "): combined_text += " "
 
         for w in lyric_words:
             w_start = w[0]
@@ -757,9 +824,12 @@ class PdfToChordProConverter:
         if delayed_chords:
              combined_text += "".join(delayed_chords)
 
-        return indent_str + combined_text.strip()
+        if is_leading:
+            return combined_text.strip()
+        else:
+            return (" " * block_indent) + combined_text.strip()
 
-    def _merge_using_chars(self, chord_line, lyric_line, label_to_strip=""):
+    def _merge_using_chars(self, chord_line, lyric_line, label_to_strip="", block_indent=0):
         # NEW logic using character precision
         
         # Prepare chords
@@ -791,95 +861,30 @@ class PdfToChordProConverter:
         
         chord_events.sort(key=lambda e: e['x'])
 
-        # Indentation (same logic)
-        indent_spaces = 0
-        if chord_words and lyric_line and lyric_line['chars']:
-            first_chord_x = chord_words[0][0]
-            first_lyric_x = lyric_line['chars'][0]['x0']
-            if first_chord_x < first_lyric_x - 2.0:
-                 chord_text = chord_words[0][4]
-                 l = len(chord_text.strip("[]()|"))
-                 if l == 1: indent_spaces = 2
-                 elif l == 2: indent_spaces = 4
-                 elif l == 3: indent_spaces = 5
-                 elif l == 4: indent_spaces = 6
-                 elif l == 5: indent_spaces = 7
-                 else: indent_spaces = 8
-        indent_str = " " * indent_spaces
-
         if not lyric_line:
-             line_str = indent_str + " ".join([c['text'] for c in chord_events])
+             line_str = (" " * block_indent) + " ".join([c['text'] for c in chord_events])
              if delayed_chords: line_str += "".join(delayed_chords)
              return line_str
 
         # Flatten lyrics chars
-        # We need to filter out label if needed
-        # Since we are working with raw chars, stripping label is harder.
-        # But we constructed 'words' in lines too, we can use heuristic:
-        # If 'text' starts with label, just drop N chars.
-        
         lyric_chars = lyric_line['chars']
         
-        if label_to_strip:
-             full_text = lyric_line['text']
-             label_clean = label_to_strip.strip()
-             
-             # Similar logic to words mode but on text
-             chars_to_skip = 0
-             text_to_check = full_text.strip()
-             prefix_found = False
-             
-             if text_to_check.startswith("End:"):
-                  prefix_found = True
-                  # Find length of "End:" in chars? 
-                  # Simple approach: rebuild text and skip
-                  # This assumes chars are in order.
-                  pass 
-
-             # Simpler: just use full_text to decide how many chars to skip from start
-             if full_text.lstrip().startswith(label_clean):
-                 # Find index in full_text where label ends
-                 start_idx = full_text.find(label_clean)
-                 end_idx = start_idx + len(label_clean)
-                 # Map this to char list. Chars might have spaces or not (spaces are chars now!)
-                 # We need to find the char index that corresponds to text index.
-                 
-                 # Let's count
-                 current_len = 0
-                 cut_index = 0
-                 for i, c in enumerate(lyric_chars):
-                     current_len += len(c['char'])
-                     if current_len > end_idx:
-                         cut_index = i + 1
-                         break
-                 
-                 # Refine: if the chars are just "1", ".", " " -> skip them
-                 # It's safer to skip chars until we pass the label
-                 
-                 # Actually, let's just use the 'words' stripping logic to know WHICH words to skip, 
-                 # then map words back to chars? No, too complex.
-                 
-                 # Let's stick to X coordinate!
-                 # If we detected a label, we know its text.
-                 # Any char that is "part of the label" should be skipped.
-                 # Label is usually at the start.
-                 
-                 # Scan chars from start
-                 match_chars = list(label_clean.replace(" ", ""))
-                 # This is getting complicated with spaces.
-                 
-                 # Fallback: if label present, skip first few chars that look like label
-                 pass
-
-        # For now, let's assume label stripping is less critical for the specific char positioning 
-        # or implement a simple X-based skip if needed.
-        # But wait, if we don't strip label, we might insert chords into the label!
-        # The user wants "1. Lyrics [Am]".
+        # Skip leading spaces from the char stream to avoid double indentation
+        # We find the first non-space char to define where "text" actually starts
+        start_idx = 0
+        for i, c in enumerate(lyric_chars):
+            if c['char'].strip():
+                start_idx = i
+                break
+        else:
+            # All spaces?
+            if lyric_chars: start_idx = len(lyric_chars)
+            
+        lyric_chars = lyric_chars[start_idx:]
         
-        # Let's try to match text prefix.
+        # Label stripping logic (simplified/skipped as per original code structure)
         if label_to_strip:
              clean_label = label_to_strip.strip()
-             # Try to match chars at start
              matched_idx = -1
              temp_str = ""
              for i, c in enumerate(lyric_chars):
@@ -888,101 +893,75 @@ class PdfToChordProConverter:
                  if temp_str == clean_label or temp_str.startswith(clean_label):
                      matched_idx = i
                      break
-                 # loose match?
                  if len(temp_str) > len(clean_label) + 5: break
              
              if matched_idx >= 0:
                  lyric_chars = lyric_chars[matched_idx+1:]
+                 # Also skip any immediate whitespace after the label
+                 while lyric_chars and not lyric_chars[0]['char'].strip():
+                     lyric_chars.pop(0)
 
 
         # Merge Logic
         result_str = ""
-        
-        # We interleave chords into char stream
-        # Algorithm:
-        # iterate chars. For each char, check if any chord should be placed BEFORE it.
-        # Position logic:
-        # If chord.x < char.center -> place before char
-        # If chord.x >= char.center -> place after char (which is before next char)
-        
-        # Actually, standard logic: place chord at specific point.
-        # We iterate chords and insert them into text.
-        
-        current_char_idx = 0
-        
-        # We can reconstruct text by appending chars and chords
-        
-        # Add a sentinel char at the end (infinity X)
-        lyric_chars_with_sentinel = lyric_chars + [{'x0': 999999, 'x1': 999999, 'char': ''}]
-        
-        last_x_end = 0
-        if lyric_chars: last_x_end = lyric_chars[0]['x0']
-
         processed_chords = [False] * len(chord_events)
+        indent_inserted = False
+
+        # If we have no lyrics left after stripping, it's essentially an empty line (or just chords)
+        if not lyric_chars:
+             # Just chords
+             for ch in chord_events:
+                 result_str += ch['text']
+             final_res = (" " * block_indent) + result_str
+             if delayed_chords: final_res += "".join(delayed_chords)
+             return final_res.replace("//:", "||:").replace("://", ":||")
         
         for i, c in enumerate(lyric_chars):
             c_center = (c['x0'] + c['x1']) / 2
             c_start = c['x0']
             
-            # Smart Space Injection: Check gap from previous char
-            if i > 0:
-                prev_c = lyric_chars[i-1]
-                dist = c_start - prev_c['x1']
-                # Threshold > 2.0 implies visual space. 
-                # Only insert if neither char is already a space.
-                if dist > 2.0 and c['char'] != ' ' and prev_c['char'] != ' ':
-                     # But where to insert? Before chords or after?
-                     # A space belongs to the text stream. 
-                     # If we insert it, we should probably check if any chords fit in that space gap too.
-                     # For simplicity, let's append space to result_str NOW.
-                     # Note: chords for THIS char (c) are inserted below.
-                     # If a chord was in the gap, it might have been skipped or belongs to 'before this char'.
-                     # Let's just add the space.
-                     result_str += " "
-
-            # Check for chords that belong BEFORE this char
-            # A chord belongs before this char if:
-            # 1. It is the first char and chord is before it.
-            # 2. Chord is between prev char and this char.
-            # 3. Chord is ON this char but in left half.
-            
-            # Find all chords that haven't been processed and should appear here
+            # Insert chords that are before this char
             for ch_i, chord in enumerate(chord_events):
                 if processed_chords[ch_i]: continue
                 
                 should_insert = False
-                
-                # If chord is way before (e.g. indentation or previous space gap)
                 if chord['x'] < c_start:
                     should_insert = True
-                    
-                # If chord is on the char
                 elif chord['x'] >= c_start and chord['x'] < c['x1']:
-                    # Check center
                     if chord['x'] < c_center:
                          should_insert = True
-                    # else: wait for next iteration (insert after) or next char?
-                    # If we don't insert now, we will visit this chord again on next char?
-                    # No, if it's in right half, it should be inserted AFTER this char.
-                    # which effectively means BEFORE next char.
-                    # So we just skip it now.
                 
                 if should_insert:
                     result_str += chord['text']
                     processed_chords[ch_i] = True
             
+            # Insert Indent just before the first actual char
+            if not indent_inserted:
+                result_str += " " * block_indent
+                indent_inserted = True
+
+            # Smart Space Injection
+            if i > 0:
+                prev_c = lyric_chars[i-1]
+                dist = c_start - prev_c['x1']
+                if dist > 2.0 and c['char'] != ' ' and prev_c['char'] != ' ':
+                     result_str += " "
+
             result_str += c['char']
             
-        # Append remaining chords (at the end of line)
+        # Append remaining chords
         for ch_i, chord in enumerate(chord_events):
             if not processed_chords[ch_i]:
                 result_str += chord['text']
 
         if delayed_chords:
              result_str += "".join(delayed_chords)
+        
+        # Fallback if loop didn't run (unlikely given check above)
+        if not indent_inserted:
+             result_str = (" " * block_indent) + result_str
 
-        final_res = indent_str + result_str.strip()
-        return final_res.replace("//:", "||:").replace("://", ":||")
+        return result_str.rstrip().replace("//:", "||:").replace("://", ":||")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert PDF to ChordPro")
