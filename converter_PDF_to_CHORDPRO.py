@@ -575,7 +575,7 @@ class PdfToChordProConverter:
                          content_lines.append(l['text'].strip())
 
                  if content_lines_count > 0:
-                      self.log(f"--WARNING--: Блок Reference/Comment содержит дополнительный контент ({content_lines_count} строк) помимо заголовка: '{label_text}'")
+                      self.log(f"--WARNING--: Блок Comment содержит больше 1 строки. Возможно, секция не определилась! ({content_lines_count} строк) помимо коммента: '{label_text}'")
 
         output.append(start_tag)
 
@@ -651,7 +651,7 @@ class PdfToChordProConverter:
                 i += 1
 
         output.append(end_tag)
-        
+
         if block_indent > 0:
             self.current_song_rule14_sections.append("\n".join(output))
 
