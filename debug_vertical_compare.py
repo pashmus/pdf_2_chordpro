@@ -64,7 +64,7 @@ def get_lines_chars(page):
                 for c_obj in chars:
                     c = c_obj["c"]
                     # if not c.strip(): continue # Removed filter to see spaces
-                    
+
                     bbox = c_obj["bbox"]
                     y_center = (bbox[1] + bbox[3]) / 2
 
@@ -92,7 +92,7 @@ def get_lines_chars(page):
     for y in sorted_ys:
         chars = lines_map[y]
         text_content = "".join([c['char'] for c in chars])
-        
+
         if not chars: continue
         if not text_content.strip(): continue # Skip lines with only whitespace
 
