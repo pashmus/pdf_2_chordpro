@@ -15,19 +15,77 @@ CHORD_PATTERN = re.compile(
     r'^[A-H](?:b|#)?(?:2|5|m|maj|min|dim|aug|sus|add)?(?:[0-9]{1,2})?(?:/[A-H](?:b|#)?)?$'
 )
 CHORD_LINE_RATIO = 0.4
-GAP_THRESHOLD_RATIO = 0.5
+GAP_THRESHOLD_RATIO = 0.3
 WORD_GAP_PT = 2.0
+# Референсные значения для "нормального" шрифта (примерно 10-12pt)
+REFERENCE_CHAR_WIDTH = 6.0  # средняя ширина символа в поинтах для шрифта ~10pt (справочная инфа)
+REFERENCE_LINE_HEIGHT = 12.0  # средняя высота строки для шрифта ~10pt (используется)
+WORD_GAP_RATIO = 0.3  # относительный порог: разрыв считается границей слова, если он > 30% от ширины символа
 KEY_SCAN_MAX_LINES = 20
 INDENT_BY_CHORD_LEN = {1: 2, 2: 4, 3: 5, 4: 6, 5: 7}
 INDENT_DEFAULT = 8
 STRUCTURAL_CHARS = frozenset(["//:", "://", "|", "|:", ":|"])
 
 
-def _chars_to_simulated_words(chars):
+def _calculate_adaptive_gap_threshold(chars, line_height):
+    """
+    Вычисляет адаптивный порог разрыва между символами на основе размера шрифта.
+
+    Args:
+        chars: список символов строки
+        line_height: высота строки в поинтах
+
+    Returns:
+        Порог разрыва в поинтах
+    """
+    if not chars:
+        return WORD_GAP_PT
+
+    # Вычисляем среднюю ширину не-пробельных символов
+    char_widths = []
+    for c in chars:
+        if c['char'].strip():  # Пропускаем пробелы
+            width = c['x1'] - c['x0']
+            if width > 0:
+                char_widths.append(width)
+
+    if not char_widths:
+        return WORD_GAP_PT
+
+    # Используем медиану для устойчивости к выбросам
+    char_widths_sorted = sorted(char_widths)
+    median_idx = len(char_widths_sorted) // 2
+    if len(char_widths_sorted) % 2 == 0:
+        avg_char_width = (char_widths_sorted[median_idx - 1] + char_widths_sorted[median_idx]) / 2
+    else:
+        avg_char_width = char_widths_sorted[median_idx]
+
+    # Метод 1: На основе ширины символа (более точный для горизонтальных разрывов)
+    threshold_by_width = avg_char_width * WORD_GAP_RATIO
+
+    # Метод 2: На основе высоты строки (индикатор размера шрифта)
+    threshold_by_height = WORD_GAP_PT * (line_height / REFERENCE_LINE_HEIGHT)
+
+    # Комбинируем оба метода (взвешенное среднее)
+    # Больше веса даём методу по ширине, т.к. он более релевантен для горизонтальных разрывов
+    adaptive_threshold = 0.7 * threshold_by_width + 0.3 * threshold_by_height
+
+    # Ограничиваем снизу и сверху разумными значениями
+    min_threshold = WORD_GAP_PT * 0.5  # Не меньше половины базового
+    max_threshold = WORD_GAP_PT * 5.0  # Не больше 5x базового
+
+    return max(min_threshold, min(adaptive_threshold, max_threshold))
+
+
+def _chars_to_simulated_words(chars, gap_threshold=None):
     """
     Собирает из списка символов (chars) «слова» по пробелам и по расстоянию между символами.
+    gap_threshold: порог разрыва в поинтах (если None, используется WORD_GAP_PT)
     Возвращает список кортежей (x0, y0, x1, y1, text) как в page.get_text("words").
     """
+    if gap_threshold is None:
+        gap_threshold = WORD_GAP_PT
+
     words_simulated = []
     current_word_chars = []
 
@@ -36,7 +94,7 @@ def _chars_to_simulated_words(chars):
         if i > 0 and not is_space:
             prev_c = chars[i - 1]
             dist = c['x0'] - prev_c['x1']
-            if dist > WORD_GAP_PT:
+            if dist > gap_threshold:  # Используем переданный порог
                 if current_word_chars:
                     _flush_word(current_word_chars, words_simulated)
                     current_word_chars = []
@@ -125,8 +183,8 @@ class PdfToChordProConverter:
 
         doc = fitz.open(pdf_path)
         all_lines = []
-        for page in doc:
-            page_lines = self._extract_lines_from_page(page, pdf_path.name)
+        for page_num, page in enumerate(doc):
+            page_lines = self._extract_lines_from_page(page, pdf_path.name, page_num=page_num)
             all_lines.extend(page_lines)
 
         chordpro_content = self._convert_lines_to_chordpro(all_lines, metadata, pdf_path.name)
@@ -142,13 +200,13 @@ class PdfToChordProConverter:
             return int(match.group(1))
         return None
 
-    def _extract_lines_from_page(self, page, filename=""):
+    def _extract_lines_from_page(self, page, filename="", page_num=0):
         # Dispatcher
         if self.use_word_mode:
             return self._extract_lines_from_page_words(page)
 
         # Try chars first
-        lines = self._extract_lines_from_page_chars(page)
+        lines = self._extract_lines_from_page_chars(page, page_num=page_num)
 
         # Heuristic check: if we got lines but they seem empty of content or weird (e.g. no spaces found ever), fallback?
         # For now, let's rely on the extraction logic itself to return None/Empty if it fails to find chars.
@@ -223,7 +281,7 @@ class PdfToChordProConverter:
 
         return processed_lines
 
-    def _extract_lines_from_page_chars(self, page):
+    def _extract_lines_from_page_chars(self, page, page_num=0):
         raw = page.get_text("rawdict")
         lines_map = {}  # y -> list of char objects
 
@@ -238,18 +296,18 @@ class PdfToChordProConverter:
                         c = c_obj["c"]
                         bbox = c_obj["bbox"]
                         # bbox: x0, y0, x1, y1
+                        # Группируем по нижней границе (y1), чтобы подстрочные индексы попадали в ту же строку
+                        y1 = bbox[3]
 
-                        y_center = (bbox[1] + bbox[3]) / 2
-
-                        # Поиск строки по Y
+                        # Поиск строки по y1 (базовая линия)
                         found_y = None
                         for y in lines_map.keys():
-                            if abs(y - y_center) < TOLERANCE_Y:
+                            if abs(y - y1) < TOLERANCE_Y:
                                 found_y = y
                                 break
 
                         if found_y is None:
-                            found_y = y_center
+                            found_y = y1
                             lines_map[found_y] = []
 
                         lines_map[found_y].append({
@@ -263,22 +321,28 @@ class PdfToChordProConverter:
         sorted_ys = sorted(lines_map.keys())
         processed_lines = []
 
-        for y in sorted_ys:
+        for y_idx, y in enumerate(sorted_ys):
             chars = sorted(lines_map[y], key=lambda c: c['x0'])
 
             # Reconstruct text
             text_content = "".join([c['char'] for c in chars])
-            if not text_content.strip(): continue # Skip lines with only whitespace
 
-            # Совместимость с check_is_chord_line: «слова» из символов
-            words_simulated = _chars_to_simulated_words(chars)
+            if not text_content.strip(): continue # Skip lines with only whitespace
 
             if not chars:
                 continue
 
+            # Вычисляем высоту строки ДО разбиения на слова (нужна для адаптивного порога)
             line_top = min(c['y0'] for c in chars)
             line_bottom = max(c['y1'] for c in chars)
             line_height = line_bottom - line_top
+
+            # Вычисляем адаптивный порог для этой строки на основе размера шрифта
+            adaptive_gap_threshold = _calculate_adaptive_gap_threshold(chars, line_height)
+
+            # Совместимость с check_is_chord_line: «слова» из символов
+            # Передаём адаптивный порог в функцию разбиения на слова
+            words_simulated = _chars_to_simulated_words(chars, gap_threshold=adaptive_gap_threshold)
 
             processed_lines.append({
                 'y': y,
@@ -783,11 +847,11 @@ class PdfToChordProConverter:
                 first_chord = parts[0].strip()
                 second_content = parts[1].rstrip(")").strip()
 
-                if first_chord: 
-                    formatted_chord = f"[(1.][{first_chord})]" 
-                else: 
+                if first_chord:
+                    formatted_chord = f"[(1.][{first_chord})]"
+                else:
                     formatted_chord = "[(1.]"
-                
+
                 raw_tokens = re.split(r'(?=[A-H])', second_content)
                 blocks = []
                 current_block_content = "(2."
@@ -804,7 +868,7 @@ class PdfToChordProConverter:
                 for idx, b in enumerate(blocks):
                      if idx == len(blocks) - 1: volt2_parts.append(f"[{b})]")
                      else: volt2_parts.append(f"[{b}]")
-                
+
                 delayed_chords.extend(volt2_parts)
             elif CHORD_PATTERN.match(raw_text.strip(".,;:()[]|")):
                 formatted_chord = f"[{raw_text}]"
