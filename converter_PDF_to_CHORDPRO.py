@@ -14,6 +14,10 @@ TOLERANCE_Y = 3
 CHORD_PATTERN = re.compile(
     r'^[A-H](?:b|#)?(?:2|5|m|maj|min|dim|aug|sus|add)?(?:[0-9]{1,2})?(?:/[A-H](?:b|#)?)?$'
 )
+# Паттерн одного аккорда без привязки к границам — для поиска первого аккорда в строке
+CHORD_TOKEN_PATTERN = re.compile(
+    r'[A-H](?:b|#)?(?:2|5|m|maj|min|dim|aug|sus|add)?(?:[0-9]{1,2})?(?:/[A-H](?:b|#)?)?'
+)
 CHORD_LINE_RATIO = 0.4
 GAP_THRESHOLD_RATIO = 0.3
 WORD_GAP_PT = 2.0
@@ -25,6 +29,29 @@ KEY_SCAN_MAX_LINES = 20
 INDENT_BY_CHORD_LEN = {1: 2, 2: 4, 3: 5, 4: 6, 5: 7}
 INDENT_DEFAULT = 8
 STRUCTURAL_CHARS = frozenset(["//:", "://", "|", "|:", ":|"])
+
+
+def _split_chord_word_by_chords(text):
+    """
+    Разбивает уже полученное «слово» (оно уже разбито по пробелам/разрывам) по границам
+    начала аккордов. Ведущий неаккордный префикс — отдельный фрагмент; каждый аккорд —
+    вместе с символами после него в этом же слове до начала следующего аккорда (часто "|").
+    Например: "|A2" -> ["|", "A2"]; "|A2|E" -> ["|", "A2|", "E"].
+    """
+    if not text:
+        return [text]
+    matches = list(CHORD_TOKEN_PATTERN.finditer(text))
+    if not matches:
+        return [text]
+    parts = []
+    # Ведущий префикс до первого аккорда
+    if matches[0].start() > 0:
+        parts.append(text[: matches[0].start()])
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        parts.append(text[start:end])
+    return parts
 
 
 def _calculate_adaptive_gap_threshold(chars, line_height):
@@ -96,18 +123,18 @@ def _chars_to_simulated_words(chars, gap_threshold=None):
             dist = c['x0'] - prev_c['x1']
             if dist > gap_threshold:  # Используем переданный порог
                 if current_word_chars:
-                    _flush_word(current_word_chars, words_simulated)
+                    _flush_word_maybe_split_chords(current_word_chars, words_simulated)
                     current_word_chars = []
 
         if is_space:
             if current_word_chars:
-                _flush_word(current_word_chars, words_simulated)
+                _flush_word_maybe_split_chords(current_word_chars, words_simulated)
                 current_word_chars = []
         else:
             current_word_chars.append(c)
 
     if current_word_chars:
-        _flush_word(current_word_chars, words_simulated)
+        _flush_word_maybe_split_chords(current_word_chars, words_simulated)
     return words_simulated
 
 
@@ -119,6 +146,24 @@ def _flush_word(current_word_chars, out_list):
     wy1 = max(ch['y1'] for ch in current_word_chars)
     wtext = "".join(ch['char'] for ch in current_word_chars)
     out_list.append((wx0, wy0, wx1, wy1, wtext))
+
+
+def _flush_word_maybe_split_chords(current_word_chars, out_list):
+    """
+    Сбрасывает накопленное слово в out_list. Если в слове несколько аккордов — разбивает по границам
+    аккордов и добавляет каждый фрагмент отдельно с реальными координатами из символов.
+    """
+    text = "".join(c['char'] for c in current_word_chars)
+    parts = _split_chord_word_by_chords(text)
+    if len(parts) == 1:
+        _flush_word(current_word_chars, out_list)
+        return
+    idx = 0
+    for part in parts:
+        chunk = current_word_chars[idx : idx + len(part)]
+        idx += len(part)
+        if chunk:
+            _flush_word(chunk, out_list)
 
 
 class PdfToChordProConverter:
@@ -260,6 +305,7 @@ class PdfToChordProConverter:
         processed_lines = []
         for y in sorted_ys:
             line_words = sorted(lines[y], key=lambda w: w[0])
+            line_words = self._refine_chord_line_words(line_words)
             text_content = " ".join([w[4] for w in line_words])
 
             # Calculate geometry
@@ -366,6 +412,34 @@ class PdfToChordProConverter:
         )
         total_tokens = len(words)
         return (chord_count / total_tokens) >= CHORD_LINE_RATIO if total_tokens > 0 else False
+
+    def _refine_chord_line_words(self, line_words):
+        """
+        Для строки аккордов разбивает каждое слово по границам аккордов и назначает каждому
+        фрагменту виртуальный bbox пропорционально смещению в слове (в WORDS нет посимвольных координат).
+        """
+        if not line_words or not self._check_is_chord_line(line_words):
+            return line_words
+        refined = []
+        for w in line_words:
+            wx0, wy0, wx1, wy1 = w[0], w[1], w[2], w[3]
+            text = w[4]
+            parts = _split_chord_word_by_chords(text)
+            if len(parts) == 1:
+                refined.append(w)
+                continue
+            width = wx1 - wx0
+            L = len(text)
+            if L <= 0:
+                refined.append(w)
+                continue
+            offset = 0
+            for part in parts:
+                x0_part = wx0 + width * (offset / L)
+                x1_part = wx0 + width * ((offset + len(part)) / L)
+                offset += len(part)
+                refined.append((x0_part, wy0, x1_part, wy1, part))
+        return refined
 
     def _build_chordpro_headers(self, metadata, filename, lines):
         """Формирует список строк заголовка ChordPro: title, tempo, time, key."""
@@ -838,20 +912,49 @@ class PdfToChordProConverter:
         for w in lyric_words:
             events.append({'type': 'lyric', 'x': w[0], 'end': w[2], 'text': w[4]})
 
-        for w in chord_words:
+        wi = 0
+        while wi < len(chord_words):
+            w = chord_words[wi]
             raw_text = w[4]
             x = w[0]
-            formatted_chord = ""
             if "(:" in raw_text:
-                parts = raw_text.split("(:")
+                parts = raw_text.split("(:", 1)
                 first_chord = parts[0].strip()
-                second_content = parts[1].rstrip(")").strip()
+                remainder = parts[1]
 
-                if first_chord:
-                    formatted_chord = f"[(1.][{first_chord})]"
+                # Сбор полного текста второй вольты (до первой ")"), если разбито на несколько слов
+                if ")" in remainder:
+                    volt2_content_raw = remainder.split(")")[0].rstrip(")").strip()
                 else:
-                    formatted_chord = "[(1.]"
+                    volt2_content_raw = remainder.strip()
+                    wi += 1
+                    while wi < len(chord_words):
+                        next_w = chord_words[wi]
+                        next_text = next_w[4]
+                        if ")" in next_text:
+                            volt2_content_raw += " " + next_text.split(")")[0].rstrip(")").strip()
+                            break
+                        else:
+                            volt2_content_raw += " " + next_text.strip()
+                        wi += 1
+                second_content = volt2_content_raw
 
+                # Первая вольта: [(1.] отодвигаем влево на два символа (как в CHARS)
+                x_volt1 = x - 10.0
+                if lyric_words:
+                    for lw in lyric_words:
+                        l_start, l_end = lw[0], lw[2]
+                        if l_start <= x <= l_end:
+                            L = len(lw[4])
+                            if L > 0:
+                                char_width = (l_end - l_start) / L
+                                x_volt1 = x - 2 * char_width
+                            break
+                events.append({'type': 'chord', 'x': x_volt1, 'text': "[(1.]"})
+                if first_chord:
+                    events.append({'type': 'chord', 'x': x, 'text': f"[{first_chord})]"})
+
+                # Вторая вольта — в delayed_chords
                 raw_tokens = re.split(r'(?=[A-H])', second_content)
                 blocks = []
                 current_block_content = "(2."
@@ -863,18 +966,21 @@ class PdfToChordProConverter:
                     else:
                         current_block_content += token
                 blocks.append(current_block_content)
-
                 volt2_parts = []
                 for idx, b in enumerate(blocks):
-                     if idx == len(blocks) - 1: volt2_parts.append(f"[{b})]")
-                     else: volt2_parts.append(f"[{b}]")
-
+                    s = b.strip()
+                    if idx == len(blocks) - 1:
+                        volt2_parts.append(f"[{s})]")
+                    else:
+                        volt2_parts.append(f"[{s}]")
                 delayed_chords.extend(volt2_parts)
-            elif CHORD_PATTERN.match(raw_text.strip(".,;:()[]|")):
-                formatted_chord = f"[{raw_text}]"
+                wi += 1
             else:
-                formatted_chord = f"[{raw_text}]"
-            events.append({'type': 'chord', 'x': x, 'text': formatted_chord})
+                # Разбиваем слово по границам аккордов (напр. "|A2|E" -> ["|", "A2|", "E"])
+                parts = _split_chord_word_by_chords(raw_text)
+                for part in parts:
+                    events.append({'type': 'chord', 'x': x, 'text': f"[{part}]"})
+                wi += 1
 
         events.sort(key=lambda e: e['x'])
 
@@ -917,15 +1023,23 @@ class PdfToChordProConverter:
                  idx = int(round(len(w_text) * rel))
                  inserts.append((idx, c['text']))
 
+            # Части одного «слова» аккордов имеют один x → один idx; объединяем в один блок, чтобы порядок сохранился
+            by_idx = {}
+            for idx, txt in inserts:
+                by_idx.setdefault(idx, []).append(txt)
+            inserts = [(idx, "".join(texts)) for idx, texts in by_idx.items()]
+
             inserts.sort(key=lambda x: x[0], reverse=True)
             for idx, txt in inserts:
                 w_text = w_text[:idx] + txt + w_text[idx:]
 
             combined_text += w_text + " "
 
+        # Оставшиеся аккорды (после последнего слова) — без пробелов между блоками
+        combined_text = combined_text.rstrip()
         while chord_queue:
             c = chord_queue.pop(0)
-            combined_text += c['text'] + " "
+            combined_text += c['text']
 
         if delayed_chords:
              combined_text = combined_text.rstrip()  # убрать пробел перед второй вольтой
@@ -1082,19 +1196,19 @@ class PdfToChordProConverter:
                 blocks.append(current_block_content)
                 volt2_parts = []
                 for idx, b in enumerate(blocks):
+                    s = b.strip()
                     if idx == len(blocks) - 1:
-                        volt2_parts.append(f"[{b})]")
+                        volt2_parts.append(f"[{s})]")
                     else:
-                        volt2_parts.append(f"[{b}]")
+                        volt2_parts.append(f"[{s}]")
                 delayed_chords.extend(volt2_parts)
                 wi += 1
                 continue
 
-            elif CHORD_PATTERN.match(raw_text.strip(".,;:()[]|")):
-                formatted_chord = f"[{raw_text}]"
-            else:
-                formatted_chord = f"[{raw_text}]"
-            chord_events.append({'x': x, 'text': formatted_chord})
+            # Разбиваем слово по границам аккордов (напр. "|A2|E" -> ["|", "A2|", "E"])
+            parts = _split_chord_word_by_chords(raw_text)
+            for part in parts:
+                chord_events.append({'x': x, 'text': f"[{part}]"})
             wi += 1
 
         chord_events.sort(key=lambda e: e['x'])
@@ -1146,7 +1260,8 @@ class PdfToChordProConverter:
 
             result_str += c['char']
 
-        # Добавляем оставшиеся аккорды
+        # Добавляем оставшиеся аккорды (после последней буквы — без пробелов между блоками)
+        result_str = result_str.rstrip()
         for ch_i, chord in enumerate(chord_events):
             if not processed_chords[ch_i]:
                 result_str += chord['text']
