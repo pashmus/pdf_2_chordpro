@@ -955,7 +955,7 @@ class PdfToChordProConverter:
                     events.append({'type': 'chord', 'x': x, 'text': f"[{first_chord})]"})
 
                 # Вторая вольта — в delayed_chords
-                raw_tokens = re.split(r'(?=[A-H])', second_content)
+                raw_tokens = re.split(r'(?<!/)(?=[A-H])', second_content)
                 blocks = []
                 current_block_content = "(2."
                 for token in raw_tokens:
@@ -1182,7 +1182,7 @@ class PdfToChordProConverter:
                         chord_events.append({'x': target_x_for_volt1, 'text': "[(1.]"})
 
                 # --- 2. Вторая вольта (2. ---
-                raw_tokens = re.split(r'(?=[A-H])', second_content)
+                raw_tokens = re.split(r'(?<!/)(?=[A-H])', second_content)
                 blocks = []
                 current_block_content = "(2."
                 for token in raw_tokens:
