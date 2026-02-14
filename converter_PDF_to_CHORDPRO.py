@@ -847,10 +847,29 @@ class PdfToChordProConverter:
         if first_lyric_x is None:
              return 0
 
-        if first_chord_x < first_lyric_x - 2.0:
-            chord_text = c_words[0][4].strip("[]()|")
-            return INDENT_BY_CHORD_LEN.get(len(chord_text), INDENT_DEFAULT)
-        return 0
+        # Правило 14: ведущий аккорд — только если левее текста больше чем на ширину одной буквы (~12 pt)
+        if first_chord_x >= first_lyric_x - 5.0:
+            return 0
+
+        first_chord_end_x = c_words[0][2]
+        # Конец первой буквы текста: по chars точно, иначе приближение по первому слову
+        first_letter_end_x = None
+        if 'chars' in lyric_line and lyric_line['chars']:
+            for c in lyric_line['chars']:
+                if c['char'].strip():
+                    first_letter_end_x = c['x1']
+                    break
+        elif l_words:
+            w0, w2, w4 = l_words[0][0], l_words[0][2], l_words[0][4]
+            n = max(1, len(w4))
+            first_letter_end_x = w0 + (w2 - w0) / n
+
+        if first_letter_end_x is not None and first_chord_end_x >= first_letter_end_x:
+            # Аккорд по смыслу на первой букве (сдвиг в PDF из-за верстки) — правило 14 не применяем
+            return 0
+
+        chord_text = c_words[0][4].strip("[]()|")
+        return INDENT_BY_CHORD_LEN.get(len(chord_text), INDENT_DEFAULT)
 
     def _detect_key_global(self, lines):
         count = 0
@@ -897,12 +916,15 @@ class PdfToChordProConverter:
                   elif lyric_words and len(lyric_words) > 1 and (lyric_words[0][4] + lyric_words[1][4]).replace(" ", "") == label_clean.replace(" ", ""):
                        lyric_words = lyric_words[2:]
 
-        # Check for leading chord
+        # Check for leading chord (правило 14: порог 12 pt ≈ одна буква; не leading, если аккорд заканчивается не раньше конца первой буквы)
         is_leading = False
         if chord_words and lyric_words:
             first_chord_x = chord_words[0][0]
+            first_chord_end_x = chord_words[0][2]
             first_lyric_x = lyric_words[0][0]
-            if first_chord_x < first_lyric_x - 2.0:
+            w0, w2, w4 = lyric_words[0][0], lyric_words[0][2], lyric_words[0][4]
+            first_letter_end_x = w0 + (w2 - w0) / max(1, len(w4))
+            if first_chord_x < first_lyric_x - 5.0 and first_chord_end_x < first_letter_end_x:
                 is_leading = True
 
         # Events
