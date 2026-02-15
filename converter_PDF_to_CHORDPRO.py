@@ -8,6 +8,7 @@ import os
 import argparse
 from pathlib import Path
 from database_manager import DatabaseManager
+from key_analyser import parse_chordpro_content, analyze_key
 
 # --- Константы ---
 TOLERANCE_Y = 3
@@ -25,10 +26,22 @@ WORD_GAP_PT = 2.0
 REFERENCE_CHAR_WIDTH = 6.0  # средняя ширина символа в поинтах для шрифта ~10pt (справочная инфа)
 REFERENCE_LINE_HEIGHT = 12.0  # средняя высота строки для шрифта ~10pt (используется)
 WORD_GAP_RATIO = 0.3  # относительный порог: разрыв считается границей слова, если он > 30% от ширины символа
-KEY_SCAN_MAX_LINES = 20
 INDENT_BY_CHORD_LEN = {1: 2, 2: 4, 3: 5, 4: 6, 5: 7}
 INDENT_DEFAULT = 8
 STRUCTURAL_CHARS = frozenset(["//:", "://", "|", "|:", ":|"])
+KEY_CONFIDENCE_THRESHOLD = 0.75
+
+
+def _german_to_standard_in_brackets(content):
+    """Внутри каждой пары [...] заменяет германскую нотацию на стандартную: H→B, B→Bb."""
+    def replace_inside(m):
+        s = m.group(1)
+        temp = "###TEMP###"
+        s = s.replace("H", temp)
+        s = s.replace("B", "Bb")
+        s = s.replace(temp, "B")
+        return "[" + s + "]"
+    return re.sub(r'\[(.*?)\]', replace_inside, content)
 
 
 def _split_chord_word_by_chords(text):
@@ -174,7 +187,8 @@ class PdfToChordProConverter:
         self.output_dir = Path(output_dir)
         self.db_manager = DatabaseManager()
         self.parsing_report = []
-        self.rule14_report = []  # New list for Rule 14 report
+        self.rule14_report = []
+        self.key_warnings = []
         self.use_word_mode = use_word_mode
 
     def log(self, message):
@@ -191,6 +205,9 @@ class PdfToChordProConverter:
         if self.rule14_report:
             with open("rule14_report.txt", "w", encoding="utf-8") as f:
                 f.write("\n".join(self.rule14_report))
+        if self.key_warnings:
+            with open("key_analysis_warnings.txt", "w", encoding="utf-8") as f:
+                f.write("\n".join(self.key_warnings))
 
     def process_all(self):
         if not self.input_dir.exists():
@@ -233,6 +250,26 @@ class PdfToChordProConverter:
             all_lines.extend(page_lines)
 
         chordpro_content = self._convert_lines_to_chordpro(all_lines, metadata, pdf_path.name)
+        chordpro_content = _german_to_standard_in_brackets(chordpro_content)
+
+        chords = parse_chordpro_content(chordpro_content)
+        key_str, confidence, note = analyze_key(chords)
+
+        if key_str is None:
+            self.key_warnings.append(f"{pdf_path.name}: тональность не определена")
+        else:
+            if confidence is not None and confidence < KEY_CONFIDENCE_THRESHOLD:
+                self.key_warnings.append(
+                    f"{pdf_path.name}: низкая уверенность ({confidence:.2f}), тональность {key_str}"
+                )
+            # Вставка {key: ...} после {time: ...} или {tempo: ...} или {title: ...} (как раньше, перед capo)
+            key_line = "\n{key: " + key_str + "}"
+            if re.search(r'\{time:[^}]+\}', chordpro_content):
+                chordpro_content = re.sub(r'(\{time:[^}]+\})', r'\1' + key_line, chordpro_content, count=1)
+            elif re.search(r'\{tempo:[^}]+\}', chordpro_content):
+                chordpro_content = re.sub(r'(\{tempo:[^}]+\})', r'\1' + key_line, chordpro_content, count=1)
+            else:
+                chordpro_content = re.sub(r'(\{title:[^}]+\})', r'\1' + key_line, chordpro_content, count=1)
 
         output_path = self.output_dir / (pdf_path.stem + ".cho")
         with open(output_path, "w", encoding="utf-8") as f:
@@ -442,7 +479,7 @@ class PdfToChordProConverter:
         return refined
 
     def _build_chordpro_headers(self, metadata, filename, lines):
-        """Формирует список строк заголовка ChordPro: title, tempo, time, key."""
+        """Формирует список строк заголовка ChordPro: title, tempo, time (key добавляется позже из key_analyser)."""
         out = []
         title = metadata.get('title')
         if not title:
@@ -452,9 +489,6 @@ class PdfToChordProConverter:
             out.append(f"{{tempo: {metadata['tempo']}}}")
         if metadata.get('time'):
             out.append(f"{{time: {metadata['time']}}}")
-        key = self._detect_key_global(lines)
-        if key:
-            out.append(f"{{key: {key}}}")
         return out
 
     def _filter_capo_from_lines(self, lines):
@@ -870,20 +904,6 @@ class PdfToChordProConverter:
 
         chord_text = c_words[0][4].strip("[]()|")
         return INDENT_BY_CHORD_LEN.get(len(chord_text), INDENT_DEFAULT)
-
-    def _detect_key_global(self, lines):
-        count = 0
-        key_prefix = re.compile(r'^([A-H](?:b|#)?)')
-        for line in lines:
-            if count >= KEY_SCAN_MAX_LINES:
-                break
-            if line['is_chord_line']:
-                count += 1
-                for w in line['words']:
-                    m = key_prefix.match(w[4].strip(".,;:()[]|"))
-                    if m:
-                        return m.group(1)
-        return None
 
     def _merge_chords_and_lyrics(self, chord_line, lyric_line, label_to_strip="", block_indent=0):
         # Dispatch to appropriate method

@@ -44,13 +44,37 @@ def parse_chordpro(file_path):
 
     return chords
 
+
+def parse_chordpro_content(content):
+    """
+    То же, что parse_chordpro, но по переданной строке (без чтения файла).
+    Извлекает аккорды из первого куплета и первого припева.
+    """
+    if not content:
+        return []
+    chords = []
+    verse_match = re.search(
+        r'\{(?:sov|start_of_verse)(?::[^}]*)?\}(.*?)\{(?:eov|end_of_verse)(?::[^}]*)?\}',
+        content, re.DOTALL | re.IGNORECASE
+    )
+    if verse_match:
+        chords.extend(extract_chords(verse_match.group(1)))
+    chorus_match = re.search(
+        r'\{(?:soc|start_of_chorus)(?::[^}]*)?\}(.*?)\{(?:eoc|end_of_chorus)(?::[^}]*)?\}',
+        content, re.DOTALL | re.IGNORECASE
+    )
+    if chorus_match:
+        chords.extend(extract_chords(chorus_match.group(1)))
+    return chords
+
+
 def analyze_key(chords):
     """
-    Analyzes the key from a list of chords using music21.
-    Returns the detected key as a string, or None if analysis fails.
+    Анализирует тональность по списку аккордов (music21).
+    Возвращает (key_str, confidence, note): key_str или None, confidence (float/None), строка примечания.
     """
     if not chords:
-        return None, "No chords found in first verse/chorus"
+        return None, None, "No chords found in first verse/chorus"
 
     s = music21.stream.Stream()
 
@@ -91,7 +115,7 @@ def analyze_key(chords):
                 continue
 
     if not cleaned_chords:
-        return None, "Could not parse any chords"
+        return None, None, "Could not parse any chords"
 
     try:
         key = s.analyze('key')
@@ -99,9 +123,10 @@ def analyze_key(chords):
         tonic = key.tonic.name.replace('-', 'b')
         tonic = tonic[0].upper() + tonic[1:] if len(tonic) > 1 else tonic.upper()
         key_str = tonic if key.mode == 'major' else tonic + 'm'
-        return key_str, f"Confidence: {key.correlationCoefficient:.2f}"
+        note = f"Confidence: {key.correlationCoefficient:.2f}"
+        return key_str, key.correlationCoefficient, note
     except Exception as e:
-        return None, f"Analysis error: {e}"
+        return None, None, f"Analysis error: {e}"
 
 def main():
     output_dir = Path("output_cho_test")
@@ -120,7 +145,7 @@ def main():
     for file_path in files:
         print(f"Analyzing {file_path.name}...")
         chords = parse_chordpro(file_path)
-        key, note = analyze_key(chords)
+        key, _, note = analyze_key(chords)
 
         results.append({
             "filename": file_path.name,
