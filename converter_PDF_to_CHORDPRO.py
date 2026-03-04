@@ -1063,19 +1063,21 @@ class PdfToChordProConverter:
                         wi += 1
                 second_content = volt2_content_raw
 
-                # Первая вольта: [(1.] отодвигаем влево на два символа (как в CHARS)
-                x_volt1 = x - 10.0
-                if lyric_words:
-                    for lw in lyric_words:
-                        l_start, l_end = lw[0], lw[2]
-                        if l_start <= x <= l_end:
-                            L = len(lw[4])
-                            if L > 0:
-                                char_width = (l_end - l_start) / L
-                                x_volt1 = x - 2 * char_width
-                            break
-                events.append({'type': 'chord', 'x': x_volt1, 'text': "[(1.]"})
+                # --- 1. Первая вольта (1. ---
+                # Если есть текст перед (:, то это первая вольта
                 if first_chord:
+                    # Первая вольта: [(1.] отодвигаем влево на два символа (как в CHARS)
+                    x_volt1 = x - 10.0
+                    if lyric_words:
+                        for lw in lyric_words:
+                            l_start, l_end = lw[0], lw[2]
+                            if l_start <= x <= l_end:
+                                L = len(lw[4])
+                                if L > 0:
+                                    char_width = (l_end - l_start) / L
+                                    x_volt1 = x - 2 * char_width
+                                break
+                    events.append({'type': 'chord', 'x': x_volt1, 'text': "[(1.]"})
                     events.append({'type': 'chord', 'x': x, 'text': f"[{first_chord})]"})
 
                 # Вторая вольта — в delayed_chords
@@ -1334,62 +1336,32 @@ class PdfToChordProConverter:
                 second_content = volt2_content_raw
 
                 # --- 1. Первая вольта (1. ---
-                target_x_for_volt1 = x - 10.0
-                if lyric_chars:
-                    closest_char_idx = -1
-                    min_dist = float('inf')
-                    for ci, c in enumerate(lyric_chars):
-                        dist = abs(c['x0'] - x)
-                        if dist < min_dist:
-                            min_dist = dist
-                            closest_char_idx = ci
-                    if closest_char_idx != -1:
-                        target_idx = closest_char_idx - 2
-                        if target_idx >= 0:
-                            target_x_for_volt1 = lyric_chars[target_idx]['x0']
-                        elif target_idx == -1:
-                            if lyric_chars:
-                                w_char = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
-                                target_x_for_volt1 = lyric_chars[0]['x0'] - w_char
-                        else:
-                            if lyric_chars:
-                                w_char = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
-                                target_x_for_volt1 = lyric_chars[0]['x0'] - (2 * w_char)
-
                 if pre_text:
+                    target_x_for_volt1 = x - 10.0
+                    if lyric_chars:
+                        closest_char_idx = -1
+                        min_dist = float('inf')
+                        for ci, c in enumerate(lyric_chars):
+                            dist = abs(c['x0'] - x)
+                            if dist < min_dist:
+                                min_dist = dist
+                                closest_char_idx = ci
+                        if closest_char_idx != -1:
+                            target_idx = closest_char_idx - 2
+                            if target_idx >= 0:
+                                target_x_for_volt1 = lyric_chars[target_idx]['x0']
+                            elif target_idx == -1:
+                                if lyric_chars:
+                                    w_char = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
+                                    target_x_for_volt1 = lyric_chars[0]['x0'] - w_char
+                            else:
+                                if lyric_chars:
+                                    w_char = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
+                                    target_x_for_volt1 = lyric_chars[0]['x0'] - (2 * w_char)
+
                     # Аккорд в том же слове что и "(:"
                     chord_events.append({'x': target_x_for_volt1, 'text': "[(1.]"})
                     chord_events.append({'x': x, 'text': f"[{pre_text})]"})
-                else:
-                    # "(: " отдельным словом — модифицируем предыдущий аккорд
-                    if chord_events:
-                        last = chord_events[-1]
-                        t = last['text'].strip("[] ")
-                        last['text'] = f"[{t})]"
-                        prev_x = last['x']
-                        target_x_prev = prev_x - 10.0
-                        if lyric_chars:
-                            closest_ci = -1
-                            min_d = float('inf')
-                            for ci, c in enumerate(lyric_chars):
-                                d = abs(c['x0'] - prev_x)
-                                if d < min_d:
-                                    min_d = d
-                                    closest_ci = ci
-                            if closest_ci != -1:
-                                t_idx = closest_ci - 2
-                                if t_idx >= 0:
-                                    target_x_prev = lyric_chars[t_idx]['x0']
-                                elif t_idx == -1 and lyric_chars:
-                                    w_c = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
-                                    target_x_prev = lyric_chars[0]['x0'] - w_c
-                                else:
-                                    if lyric_chars:
-                                        w_c = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
-                                        target_x_prev = lyric_chars[0]['x0'] - (2 * w_c)
-                        chord_events.append({'x': target_x_prev, 'text': "[(1.]"})
-                    else:
-                        chord_events.append({'x': target_x_for_volt1, 'text': "[(1.]"})
 
                 # --- 2. Вторая вольта (2. ---
                 raw_tokens = re.split(r'(?<!/)(?=[A-H])', second_content)
