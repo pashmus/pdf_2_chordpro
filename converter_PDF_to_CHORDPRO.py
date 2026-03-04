@@ -182,7 +182,7 @@ def _flush_word_maybe_split_chords(current_word_chars, out_list):
 class PdfToChordProConverter:
     """Конвертирует PDF-файлы песен в формат ChordPro (.cho)."""
 
-    def __init__(self, input_dir="input_pdf", output_dir="output_cho", use_word_mode=False):
+    def __init__(self, input_dir="input_pdf_test", output_dir="output_cho_test", use_word_mode=False):
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.db_manager = DatabaseManager()
@@ -959,6 +959,88 @@ class PdfToChordProConverter:
             w = chord_words[wi]
             raw_text = w[4]
             x = w[0]
+
+            # --- New Logic: (Chord) without colon => 1. Volt only ---
+            # Try to look ahead if we see an opening parenthesis but not (:
+            is_parenthesized_volt1 = False
+            volt1_content = ""
+            tokens_consumed = 0
+            
+            # Check if current token starts with '(' and is NOT '(:'.
+            # Also handle if it is just "("
+            if raw_text.startswith("(") and not raw_text.startswith("(:"):
+                 # Collect tokens until we find a closing parenthesis
+                 temp_content = raw_text
+                 temp_consumed = 0
+                 
+                 # If the current token itself has the closing parenthesis, e.g. "(E7)"
+                 if ")" in raw_text:
+                     # Check inner content for colon at start (e.g. "(:E") - handled by old logic?
+                     # Old logic checks 'if "(:" in raw_text'.
+                     # If raw_text is "(E7)", no colon.
+                     # If raw_text is "(:E)", old logic catches it later.
+                     # But we must ensure we don't process it here if it is "(:".
+                     # We already checked 'not startswith("(:")'.
+                     # What if it is "( : E)" ? - that would be weird for 2nd volt.
+                     # Assume 2nd volt always starts with (:
+                     
+                     # We need to verify if it looks like a chord or chord sequence
+                     inner = raw_text[1:].split(")")[0] # take content between ( and )
+                     # If inner starts with :, it's 2nd volt (e.g. "(:E)") -> skip
+                     if not inner.strip().startswith(":"):
+                         is_parenthesized_volt1 = True
+                         volt1_content = inner
+                         tokens_consumed = 0 # No extra tokens consumed, just current one
+                 else:
+                     # Look ahead
+                     found_closing = False
+                     future_content = []
+                     idx_offset = 1
+                     while wi + idx_offset < len(chord_words):
+                         next_w_text = chord_words[wi + idx_offset][4]
+                         future_content.append(next_w_text)
+                         if ")" in next_w_text:
+                             found_closing = True
+                             break
+                         idx_offset += 1
+                     
+                     if found_closing:
+                         # Join and check
+                         full_group = raw_text + "".join(future_content) # e.g. "(" + "E7)"
+                         # Check if it is a 2nd volt start
+                         # It is 2nd volt if it looks like "(:..."
+                         # We know raw_text is "(" (or starts with it).
+                         # If raw_text is "(" and next is ":E", full is "(:E" -> 2nd volt -> skip
+                         if not full_group.replace(" ", "").startswith("(:"):
+                             is_parenthesized_volt1 = True
+                             # Content inside parens
+                             # find first ( and last )
+                             start_p = full_group.find("(")
+                             end_p = full_group.rfind(")")
+                             if start_p != -1 and end_p != -1:
+                                 volt1_content = full_group[start_p+1 : end_p].strip()
+                                 tokens_consumed = idx_offset
+
+            if is_parenthesized_volt1:
+                # Первая вольта: [(1.] отодвигаем влево на два символа
+                target_x_for_volt1 = x - 10.0
+                if lyric_words:
+                     # Try to align with text if possible, similar to logic below
+                     # (omitted for brevity, using simple offset or logic from char mode if available)
+                     # In word mode we don't have precise char coords easily, 
+                     # but let's try to use the start of the current word x
+                     pass
+
+                events.append({'type': 'chord', 'x': target_x_for_volt1, 'text': "[(1.]"})
+                
+                # Add the chord content with closing paren. 
+                # We reconstruct it as [Content)] 
+                # Use current x for the chord
+                events.append({'type': 'chord', 'x': x, 'text': f"[{volt1_content})]"})
+                
+                wi += 1 + tokens_consumed
+                continue
+
             if "(:" in raw_text:
                 parts = raw_text.split("(:", 1)
                 first_chord = parts[0].strip()
@@ -1143,6 +1225,92 @@ class PdfToChordProConverter:
             raw_text = w[4]
             x = w[0]
             formatted_chord = ""
+
+            # --- New Logic: (Chord) without colon => 1. Volt only ---
+            is_parenthesized_volt1 = False
+            volt1_content = ""
+            tokens_to_skip = 0
+
+            # 1. Check start
+            if raw_text.startswith("(") and not raw_text.startswith("(:"):
+                 # Case A: Closing paren is inside this same token
+                 if ")" in raw_text:
+                     # It's fully contained e.g. "(E7)"
+                     # We need to extract what is inside parens.
+                     # raw_text could be "(E7)" or "(A2)" etc.
+                     inner_parts = raw_text.split("(", 1)[1].split(")", 1)
+                     if inner_parts:
+                        inner = inner_parts[0].strip()
+                        # If inner starts with colon, it is 2nd volt (handled elsewhere usually, but just in case)
+                        if not inner.startswith(":"):
+                            is_parenthesized_volt1 = True
+                            volt1_content = inner
+                            tokens_to_skip = 0
+                 
+                 # Case B: Closing paren is in a future token
+                 else:
+                     collected_text = raw_text
+                     temp_skip = 0
+                     found_closing = False
+                     
+                     # Look ahead at next tokens
+                     idx = 1
+                     while wi + idx < len(chord_words):
+                         next_w = chord_words[wi + idx]
+                         next_text = next_w[4]
+                         collected_text += next_text
+                         temp_skip += 1
+                         if ")" in next_text:
+                             found_closing = True
+                             break
+                         idx += 1
+                     
+                     if found_closing:
+                         # Now we have the full text like "(E7)" or "( A )"
+                         # Extract content between first '(' and first ')' after it
+                         start_p = collected_text.find("(")
+                         end_p = collected_text.find(")", start_p)
+                         
+                         if start_p != -1 and end_p != -1:
+                             inner_full = collected_text[start_p+1 : end_p].strip()
+                             
+                             # Check if it looks like a 2nd volt "(:..."
+                             if not inner_full.startswith(":"):
+                                 is_parenthesized_volt1 = True
+                                 volt1_content = inner_full
+                                 tokens_to_skip = temp_skip
+
+            if is_parenthesized_volt1:
+                inner_chord = volt1_content
+
+                # Logic for x_volt1 (copied from below)
+                target_x_for_volt1 = x - 10.0
+                if lyric_chars:
+                    closest_char_idx = -1
+                    min_dist = float('inf')
+                    for ci, c in enumerate(lyric_chars):
+                        dist = abs(c['x0'] - x)
+                        if dist < min_dist:
+                            min_dist = dist
+                            closest_char_idx = ci
+                    if closest_char_idx != -1:
+                        target_idx = closest_char_idx - 2
+                        if target_idx >= 0:
+                            target_x_for_volt1 = lyric_chars[target_idx]['x0']
+                        elif target_idx == -1:
+                            if lyric_chars:
+                                w_char = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
+                                target_x_for_volt1 = lyric_chars[0]['x0'] - w_char
+                        else:
+                            if lyric_chars:
+                                w_char = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
+                                target_x_for_volt1 = lyric_chars[0]['x0'] - (2 * w_char)
+
+                chord_events.append({'x': target_x_for_volt1, 'text': "[(1.]"})
+                chord_events.append({'x': x, 'text': f"[{inner_chord})]"})
+                wi += 1 + tokens_to_skip
+                continue
+
             if "(:" in raw_text:
                 parts = raw_text.split("(:", 1)
                 pre_text = parts[0].strip()
