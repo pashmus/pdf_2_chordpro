@@ -1124,11 +1124,8 @@ class PdfToChordProConverter:
              c = chord_queue.pop(0)
              combined_text += c['text']
 
-             # Pad to reach block_indent
-             # We assume block_indent corresponds to column index
-             current_len = len(combined_text)
-             if current_len < block_indent:
-                 combined_text += " " * (block_indent - current_len)
+             # Add block_indent after the chord (Rule 14 fix for WORDS mode)
+             combined_text += " " * block_indent
 
              if not combined_text.endswith(" "): combined_text += " "
 
@@ -1212,6 +1209,30 @@ class PdfToChordProConverter:
                  lyric_chars = lyric_chars[matched_idx+1:]
                  while lyric_chars and not lyric_chars[0]['char'].strip():
                      lyric_chars.pop(0)
+
+        # Определяем, есть ли на ЭТОЙ строке настоящий «лидирующий» аккорд — уже ПОСЛЕ обрезки метки
+        is_line_leading = False
+        if block_indent > 0 and chord_line and lyric_chars:
+            c_words = chord_line.get('words', [])
+            if c_words:
+                first_chord_x = c_words[0][0]
+                first_chord_end_x = c_words[0][2]
+
+                # Первая видимая буква реального текста (без Bridge:/Tag: и т.п.)
+                first_lyric_x = None
+                first_letter_end_x = None
+                for c in lyric_chars:
+                    if c['char'].strip():
+                        first_lyric_x = c['x0']
+                        first_letter_end_x = c['x1']
+                        break
+
+                if first_lyric_x is not None:
+                    # Как в _get_line_indent_requirement:
+                    # аккорд «ведущий», только если он заметно левее текста
+                    # и заканчивается раньше конца первой буквы
+                    if first_chord_x < first_lyric_x - 5.0 and first_chord_end_x < first_letter_end_x:
+                        is_line_leading = True
 
         # 2. Теперь готовим аккорды
         chord_words = [list(w) for w in chord_line['words']] if chord_line else []
@@ -1429,7 +1450,9 @@ class PdfToChordProConverter:
                     processed_chords[ch_i] = True
 
             # Вставляем отступ
-            if not indent_inserted:
+            # Для строк с настоящим «лидирующим» аккордом отступ вставляем перед первой буквой (Rule 14).
+            # Для остальных строк (как в режиме WORDS) отступ будет добавлен один раз ко всей строке в конце.
+            if is_line_leading and not indent_inserted:
                 result_str += " " * block_indent
                 indent_inserted = True
 
@@ -1452,7 +1475,9 @@ class PdfToChordProConverter:
              result_str = result_str.rstrip()  # убрать пробел перед второй вольтой
              result_str += "".join(delayed_chords)
 
-        if not indent_inserted:
+        # Если отступ ещё не был вставлен внутри строки (нет лидирующего аккорда),
+        # добавляем его один раз ко всей строке — как делает режим WORDS.
+        if not indent_inserted and block_indent > 0:
              result_str = (" " * block_indent) + result_str
 
         return result_str.rstrip().replace("//:", "||:").replace("://", ":||")

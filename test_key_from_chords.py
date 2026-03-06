@@ -32,12 +32,12 @@ def analyze_key_from_chord_list(chord_list):
         return None
 
 
-# Бемоли: Bb major
+# Бемоли:
 CHORDS_B_FLAT_MAJOR = [
     "Eb", "Ebsus4", "Eb", "Ebsus4", "Fm7", "Bb", "Eb", "Bb/D", "Ab/C",
 ]
 
-# Диезы: E major
+# Диезы:
 CHORDS_E_MAJOR = [
     "F#", "F#sus4", "F#", "F#sus4", "G#m", "C#", "F#", "C#/F", "B/D#",
 ]
