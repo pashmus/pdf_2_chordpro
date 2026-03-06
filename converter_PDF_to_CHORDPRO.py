@@ -1033,10 +1033,14 @@ class PdfToChordProConverter:
 
                 events.append({'type': 'chord', 'x': target_x_for_volt1, 'text': "[(1.]"})
                 
-                # Add the chord content with closing paren. 
-                # We reconstruct it as [Content)] 
-                # Use current x for the chord
-                events.append({'type': 'chord', 'x': x, 'text': f"[{volt1_content})]"})
+                # Разбиваем содержимое первой вольты по границам аккордов (напр. "|D7" -> ["|", "D7"])
+                # чтобы символы типа "|" были в отдельных блоках, как в остальных местах
+                volt1_parts = _split_chord_word_by_chords(volt1_content)
+                for idx, part in enumerate(volt1_parts):
+                    if idx == len(volt1_parts) - 1:
+                        events.append({'type': 'chord', 'x': x, 'text': f"[{part})]"})
+                    else:
+                        events.append({'type': 'chord', 'x': x, 'text': f"[{part}]"})
                 
                 wi += 1 + tokens_consumed
                 continue
@@ -1078,7 +1082,13 @@ class PdfToChordProConverter:
                                     x_volt1 = x - 2 * char_width
                                 break
                     events.append({'type': 'chord', 'x': x_volt1, 'text': "[(1.]"})
-                    events.append({'type': 'chord', 'x': x, 'text': f"[{first_chord})]"})
+                    # Разбиваем first_chord по границам аккордов (напр. "|D7" -> ["|", "D7"])
+                    first_volt_parts = _split_chord_word_by_chords(first_chord)
+                    for idx, part in enumerate(first_volt_parts):
+                        if idx == len(first_volt_parts) - 1:
+                            events.append({'type': 'chord', 'x': x, 'text': f"[{part})]"})
+                        else:
+                            events.append({'type': 'chord', 'x': x, 'text': f"[{part}]"})
 
                 # Вторая вольта — в delayed_chords
                 raw_tokens = re.split(r'(?<!/)(?=[A-H])', second_content)
@@ -1304,7 +1314,9 @@ class PdfToChordProConverter:
                                  tokens_to_skip = temp_skip
 
             if is_parenthesized_volt1:
-                inner_chord = volt1_content
+                # Разбиваем содержимое первой вольты по границам аккордов (напр. "|D7" -> ["|", "D7"])
+                # чтобы символы типа "|" были в отдельных блоках, как в остальных местах
+                volt1_parts = _split_chord_word_by_chords(volt1_content)
 
                 # Logic for x_volt1 (copied from below)
                 target_x_for_volt1 = x - 10.0
@@ -1330,7 +1342,11 @@ class PdfToChordProConverter:
                                 target_x_for_volt1 = lyric_chars[0]['x0'] - (2 * w_char)
 
                 chord_events.append({'x': target_x_for_volt1, 'text': "[(1.]"})
-                chord_events.append({'x': x, 'text': f"[{inner_chord})]"})
+                for idx, part in enumerate(volt1_parts):
+                    if idx == len(volt1_parts) - 1:
+                        chord_events.append({'x': x, 'text': f"[{part})]"})
+                    else:
+                        chord_events.append({'x': x, 'text': f"[{part}]"})
                 wi += 1 + tokens_to_skip
                 continue
 
@@ -1382,7 +1398,13 @@ class PdfToChordProConverter:
 
                     # Аккорд в том же слове что и "(:"
                     chord_events.append({'x': target_x_for_volt1, 'text': "[(1.]"})
-                    chord_events.append({'x': x, 'text': f"[{pre_text})]"})
+                    # Разбиваем pre_text по границам аккордов (напр. "|D7" -> ["|", "D7"])
+                    first_volt_parts = _split_chord_word_by_chords(pre_text)
+                    for idx, part in enumerate(first_volt_parts):
+                        if idx == len(first_volt_parts) - 1:
+                            chord_events.append({'x': x, 'text': f"[{part})]"})
+                        else:
+                            chord_events.append({'x': x, 'text': f"[{part}]"})
 
                 # --- 2. Вторая вольта (2. ---
                 raw_tokens = re.split(r'(?<!/)(?=[A-H])', second_content)
