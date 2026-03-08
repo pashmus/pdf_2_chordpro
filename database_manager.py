@@ -103,3 +103,30 @@ class DatabaseManager:
             print(f"Error fetching metadata for song {song_number}: {e}")
             self.close()
             return None
+
+    def update_song_chordpro_if_null(self, song_number: int, chordpro_text: str) -> bool:
+        """
+        Записывает текст ChordPro в поле chordpro таблицы songs только если оно сейчас NULL.
+        Возвращает True, если обновлена хотя бы одна строка, иначе False.
+        """
+        if not self.conn:
+            if not self.connect():
+                return False
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE songs
+                    SET chordpro = %s
+                    WHERE num = %s AND chordpro IS NULL
+                    """,
+                    (chordpro_text, song_number),
+                )
+                updated = cursor.rowcount > 0
+            self.conn.commit()
+            return updated
+        except Exception as e:
+            print(f"Ошибка записи chordpro для песни {song_number}: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False

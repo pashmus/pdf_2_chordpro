@@ -182,7 +182,7 @@ def _flush_word_maybe_split_chords(current_word_chars, out_list):
 class PdfToChordProConverter:
     """Конвертирует PDF-файлы песен в формат ChordPro (.cho)."""
 
-    def __init__(self, input_dir="input_pdf_test", output_dir="output_cho_test", use_word_mode=False):
+    def __init__(self, input_dir="input_pdf", output_dir="output_cho", use_word_mode=False, write_db=False):
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.db_manager = DatabaseManager()
@@ -190,6 +190,7 @@ class PdfToChordProConverter:
         self.rule14_report = []
         self.key_warnings = []
         self.use_word_mode = use_word_mode
+        self.write_db = write_db
 
     def log(self, message):
         self.parsing_report.append(message)
@@ -242,6 +243,10 @@ class PdfToChordProConverter:
         metadata = {}
         if song_num:
             metadata = self.db_manager.get_song_metadata(song_num)
+            if metadata is None:
+                msg = f"ПРЕДУПОЖДЕНИЕ: песня с номером {song_num} не найдена в БД ({pdf_path.name})."
+                self.log(msg)
+                metadata = {}
 
         doc = fitz.open(pdf_path)
         all_lines = []
@@ -275,6 +280,20 @@ class PdfToChordProConverter:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(chordpro_content)
         self.log(f"  Сохранено в {output_path}")
+
+        # Запись chordpro в БД только при флаге -db/--write-db и только если поле NULL
+        if self.write_db:
+            if song_num:
+                try:
+                    updated = self.db_manager.update_song_chordpro_if_null(song_num, chordpro_content)
+                    if updated:
+                        self.log("  chordpro записан в БД.")
+                    else:
+                        self.log("  --WARNING--: chordpro в БД не обновлён (поле уже заполнено или запись не выполнена).")
+                except Exception as e:
+                    self.log(f"  Ошибка записи chordpro в БД: {e}")
+            else:
+                self.log("  --WARNING--: chordpro в БД не добавлено (в имени файла нет номера песни).")
 
     def _extract_song_number(self, filename):
         match = re.match(r'^(\d+)', filename)
@@ -965,14 +984,14 @@ class PdfToChordProConverter:
             is_parenthesized_volt1 = False
             volt1_content = ""
             tokens_consumed = 0
-            
+
             # Check if current token starts with '(' and is NOT '(:'.
             # Also handle if it is just "("
             if raw_text.startswith("(") and not raw_text.startswith("(:"):
                  # Collect tokens until we find a closing parenthesis
                  temp_content = raw_text
                  temp_consumed = 0
-                 
+
                  # If the current token itself has the closing parenthesis, e.g. "(E7)"
                  if ")" in raw_text:
                      # Check inner content for colon at start (e.g. "(:E") - handled by old logic?
@@ -983,7 +1002,7 @@ class PdfToChordProConverter:
                      # We already checked 'not startswith("(:")'.
                      # What if it is "( : E)" ? - that would be weird for 2nd volt.
                      # Assume 2nd volt always starts with (:
-                     
+
                      # We need to verify if it looks like a chord or chord sequence
                      inner = raw_text[1:].split(")")[0] # take content between ( and )
                      # If inner starts with :, it's 2nd volt (e.g. "(:E)") -> skip
@@ -1003,7 +1022,7 @@ class PdfToChordProConverter:
                              found_closing = True
                              break
                          idx_offset += 1
-                     
+
                      if found_closing:
                          # Join and check
                          full_group = raw_text + "".join(future_content) # e.g. "(" + "E7)"
@@ -1027,12 +1046,12 @@ class PdfToChordProConverter:
                 if lyric_words:
                      # Try to align with text if possible, similar to logic below
                      # (omitted for brevity, using simple offset or logic from char mode if available)
-                     # In word mode we don't have precise char coords easily, 
+                     # In word mode we don't have precise char coords easily,
                      # but let's try to use the start of the current word x
                      pass
 
                 events.append({'type': 'chord', 'x': target_x_for_volt1, 'text': "[(1.]"})
-                
+
                 # Разбиваем содержимое первой вольты по границам аккордов (напр. "|D7" -> ["|", "D7"])
                 # чтобы символы типа "|" были в отдельных блоках, как в остальных местах
                 volt1_parts = _split_chord_word_by_chords(volt1_content)
@@ -1041,7 +1060,7 @@ class PdfToChordProConverter:
                         events.append({'type': 'chord', 'x': x, 'text': f"[{part})]"})
                     else:
                         events.append({'type': 'chord', 'x': x, 'text': f"[{part}]"})
-                
+
                 wi += 1 + tokens_consumed
                 continue
 
@@ -1279,13 +1298,13 @@ class PdfToChordProConverter:
                             is_parenthesized_volt1 = True
                             volt1_content = inner
                             tokens_to_skip = 0
-                 
+
                  # Case B: Closing paren is in a future token
                  else:
                      collected_text = raw_text
                      temp_skip = 0
                      found_closing = False
-                     
+
                      # Look ahead at next tokens
                      idx = 1
                      while wi + idx < len(chord_words):
@@ -1297,16 +1316,16 @@ class PdfToChordProConverter:
                              found_closing = True
                              break
                          idx += 1
-                     
+
                      if found_closing:
                          # Now we have the full text like "(E7)" or "( A )"
                          # Extract content between first '(' and first ')' after it
                          start_p = collected_text.find("(")
                          end_p = collected_text.find(")", start_p)
-                         
+
                          if start_p != -1 and end_p != -1:
                              inner_full = collected_text[start_p+1 : end_p].strip()
-                             
+
                              # Check if it looks like a 2nd volt "(:..."
                              if not inner_full.startswith(":"):
                                  is_parenthesized_volt1 = True
@@ -1507,7 +1526,8 @@ class PdfToChordProConverter:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert PDF to ChordPro")
     parser.add_argument("-w", "--words-mode", action="store_true", help="Use legacy word-level parsing (no space detection)")
+    parser.add_argument("-db", "--write-db", action="store_true", help="Записывать chordpro в БД (поле song.chordpro только если NULL). Без флага — только .cho файлы.")
     args = parser.parse_args()
 
-    converter = PdfToChordProConverter(use_word_mode=args.words_mode)
+    converter = PdfToChordProConverter(use_word_mode=args.words_mode, write_db=args.write_db)
     converter.process_all()
