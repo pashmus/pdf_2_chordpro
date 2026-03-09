@@ -574,6 +574,9 @@ class PdfToChordProConverter:
             line = lines[i]
             text = line['text'].strip()
 
+            keyword_source_text = None
+            keyword_source_index = None
+
             # If this line was already processed as a marker for the previous section (via lookahead), skip classification
             if i in processed_marker_indices:
                 # It's already part of the current section (the one we just opened)
@@ -585,6 +588,9 @@ class PdfToChordProConverter:
 
             # 1. Keyword Trigger
             keyword_type, keyword_label = self._classify_section_start(text)
+            if keyword_type:
+                keyword_source_text = text
+                keyword_source_index = i
 
             # Rule 18: Marker might be on NEXT line (if current is chords)
             # Only check if current line itself is NOT a marker
@@ -601,14 +607,22 @@ class PdfToChordProConverter:
                     if ns_type:
                         keyword_type = ns_type
                         keyword_label = ns_label
+                        keyword_source_text = next_text
+                        keyword_source_index = i + 1
                         # Mark next line as processed marker so we don't trigger a new section on it
                         processed_marker_indices.add(i + 1)
 
             # 2. Visual Break Trigger
             visual_break = False
             gap = 0.0
+            raw_gap = 0.0
+            thresh = 0.0
             if i > 0:
-                gap = self._vertical_gap(lines[i - 1], line)
+                prev_line = lines[i - 1]
+                raw_gap = line['top'] - prev_line['bottom']
+                if raw_gap > 0:
+                    thresh = max(prev_line['height'], line['height']) * GAP_THRESHOLD_RATIO
+                gap = self._vertical_gap(prev_line, line)
                 visual_break = gap > 0
 
             # 3. Decision Logic
@@ -624,7 +638,11 @@ class PdfToChordProConverter:
             elif visual_break and not keyword_type:
                 new_section_type = 'unknown'
                 new_label = ""
-                self.log_issue(f"--WARNING-- [{filename}:Строка {i}]: Обнаружен визуальный разрыв (Gap: {gap:.1f}) без ключевого слова в строке '{text[:30]}...'. Начало новой секции.")
+                self.log_issue(
+                    f"--WARNING-- [{filename}:Строка {i}]: Обнаружен визуальный разрыв "
+                    f"(Gap_eff: {gap:.1f}, Gap_raw: {raw_gap:.1f}, Thresh: {thresh:.1f}) "
+                    f"без ключевого слова в строке '{text[:30]}...'. Начало новой секции."
+                )
 
             # Case C: Only Keyword -> New section + Warning
             elif keyword_type and not visual_break:
@@ -632,7 +650,14 @@ class PdfToChordProConverter:
                 new_label = keyword_label
                 # Don't warn on very first line or if it looks like start of file logic might apply
                 if i > 0:
-                     self.log_issue(f"--WARNING-- [{filename}:Строка {i+1}]: Найдено ключевое слово '{text[:30]}...' без визуального разрыва (Gap: {gap:.1f}). Проверьте форматирование.")
+                    kw_line_no = (keyword_source_index + 1) if keyword_source_index is not None else (i + 1)
+                    kw_preview = (keyword_source_text or text)[:30]
+                    self.log_issue(
+                        f"--WARNING-- [{filename}:Строка {kw_line_no}]: Найдено ключевое слово "
+                        f"'{kw_preview}...' без значимого визуального разрыва "
+                        f"(Gap_eff: {gap:.1f}, Gap_raw: {raw_gap:.1f}, Thresh: {thresh:.1f}). "
+                        f"Проверьте форматирование."
+                    )
 
             if new_section_type:
                 # Close previous section
