@@ -191,10 +191,16 @@ class PdfToChordProConverter:
         self.key_warnings = []
         self.use_word_mode = use_word_mode
         self.write_db = write_db
+        self.files_processed = 0
+        self.db_updated_count = 0
 
     def log(self, message):
         self.parsing_report.append(message)
         print(message)
+
+    def log_issue(self, message):
+        """Добавляет сообщение в буфер аномалий текущего файла (выводится только при наличии проблем)."""
+        self.current_file_issues.append(message)
 
     def log_rule14(self, message):
         self.rule14_report.append(message)
@@ -226,18 +232,25 @@ class PdfToChordProConverter:
         else:
             self.log("Режим: CHARS (Высокая точность)")
 
+        self.files_processed = 0
+        self.db_updated_count = 0
         for pdf_file in pdf_files:
             try:
                 self.process_file(pdf_file)
             except Exception as e:
+                self.log("----------------------------")
+                self.log(f"Обработка {pdf_file.name}...")
                 self.log(f"ОШИБКА обработки {pdf_file.name}: {e}")
                 import traceback
                 traceback.print_exc()
 
+        self.log(f"Обработано файлов: {self.files_processed}.")
+        if self.write_db:
+            self.log(f"Записано в БД: {self.db_updated_count} песен.")
         self.save_report()
 
     def process_file(self, pdf_path):
-        self.log(f"Обработка {pdf_path.name}...")
+        self.current_file_issues = []
 
         song_num = self._extract_song_number(pdf_path.name)
         metadata = {}
@@ -245,7 +258,7 @@ class PdfToChordProConverter:
             metadata = self.db_manager.get_song_metadata(song_num)
             if metadata is None:
                 msg = f"ПРЕДУПОЖДЕНИЕ: песня с номером {song_num} не найдена в БД ({pdf_path.name})."
-                self.log(msg)
+                self.log_issue(msg)
                 metadata = {}
 
         doc = fitz.open(pdf_path)
@@ -279,7 +292,6 @@ class PdfToChordProConverter:
         output_path = self.output_dir / (pdf_path.stem + ".cho")
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(chordpro_content)
-        self.log(f"  Сохранено в {output_path}")
 
         # Запись chordpro в БД только при флаге -db/--write-db и только если поле NULL
         if self.write_db:
@@ -287,13 +299,21 @@ class PdfToChordProConverter:
                 try:
                     updated = self.db_manager.update_song_chordpro_if_null(song_num, chordpro_content)
                     if updated:
-                        self.log("  chordpro записан в БД.")
+                        self.db_updated_count += 1
                     else:
-                        self.log("  --WARNING--: chordpro в БД не обновлён (поле уже заполнено или запись не выполнена).")
+                        self.log_issue("  --WARNING--: chordpro в БД не обновлён (поле уже заполнено или запись не выполнена).")
                 except Exception as e:
-                    self.log(f"  Ошибка записи chordpro в БД: {e}")
+                    self.log_issue(f"  Ошибка записи chordpro в БД: {e}")
             else:
-                self.log("  --WARNING--: chordpro в БД не добавлено (в имени файла нет номера песни).")
+                self.log_issue("  --WARNING--: chordpro в БД не добавлено (в имени файла нет номера песни).")
+
+        if self.current_file_issues:
+            self.log("----------------------------")
+            self.log(f"Обработка {pdf_path.name}...")
+            for msg in self.current_file_issues:
+                self.log(msg)
+
+        self.files_processed += 1
 
     def _extract_song_number(self, filename):
         match = re.match(r'^(\d+)', filename)
@@ -329,7 +349,7 @@ class PdfToChordProConverter:
              # If rawdict didn't report spaces, maybe we should fallback?
              # Let's log a warning but proceed unless it's critical.
              # Actually, the user said "if spaces are missing... fallback".
-             self.log(f"--WARNING--: В файле {filename} не найдены явные пробелы (rawdict). Переключение в режим WORDS.")
+             self.log_issue(f"--WARNING--: В файле {filename} не найдены явные пробелы (rawdict). Переключение в режим WORDS.")
              return self._extract_lines_from_page_words(page)
 
         if not lines and total_chars == 0:
@@ -604,7 +624,7 @@ class PdfToChordProConverter:
             elif visual_break and not keyword_type:
                 new_section_type = 'unknown'
                 new_label = ""
-                self.log(f"--WARNING-- [{filename}:Строка {i}]: Обнаружен визуальный разрыв (Gap: {gap:.1f}) без ключевого слова в строке '{text[:30]}...'. Начало новой секции.")
+                self.log_issue(f"--WARNING-- [{filename}:Строка {i}]: Обнаружен визуальный разрыв (Gap: {gap:.1f}) без ключевого слова в строке '{text[:30]}...'. Начало новой секции.")
 
             # Case C: Only Keyword -> New section + Warning
             elif keyword_type and not visual_break:
@@ -612,7 +632,7 @@ class PdfToChordProConverter:
                 new_label = keyword_label
                 # Don't warn on very first line or if it looks like start of file logic might apply
                 if i > 0:
-                     self.log(f"--WARNING-- [{filename}:Строка {i+1}]: Найдено ключевое слово '{text[:30]}...' без визуального разрыва (Gap: {gap:.1f}). Проверьте форматирование.")
+                     self.log_issue(f"--WARNING-- [{filename}:Строка {i+1}]: Найдено ключевое слово '{text[:30]}...' без визуального разрыва (Gap: {gap:.1f}). Проверьте форматирование.")
 
             if new_section_type:
                 # Close previous section
@@ -705,7 +725,7 @@ class PdfToChordProConverter:
         # Warning for multiline comments
         if len(lines) > 1:
             line_preview = lines[0]['text'][:30] if lines else "Empty"
-            self.log(f"--WARNING--: Обнаружен многострочный блок комментария ({len(lines)} строк): '{line_preview}...'")
+            self.log_issue(f"--WARNING--: Обнаружен многострочный блок комментария ({len(lines)} строк): '{line_preview}...'")
 
         for line in lines:
             text = line['text'].strip()
@@ -777,7 +797,7 @@ class PdfToChordProConverter:
                       if len(header_preview) > 60:
                           header_preview = header_preview[:60] + "..."
                       mismatch_note = " (метка секции отличается от первой строки)" if block and label_text.strip() != block[0]['text'].strip() else ""
-                      self.log(f"--WARNING--: Блок Reference/Comment содержит дополнительный контент ({content_lines_count} строк) помимо заголовка: '{header_preview}'{mismatch_note}")
+                      self.log_issue(f"--WARNING--: Блок Reference/Comment содержит дополнительный контент ({content_lines_count} строк) помимо заголовка: '{header_preview}'{mismatch_note}")
 
         output.append(start_tag)
 
