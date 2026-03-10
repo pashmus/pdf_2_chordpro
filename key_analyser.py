@@ -145,14 +145,22 @@ def main():
     for file_path in files:
         print(f"Analyzing {file_path.name}...")
         chords = parse_chordpro(file_path)
-        key, _, note = analyze_key(chords)
+        key, confidence, note = analyze_key(chords)
 
         results.append({
             "filename": file_path.name,
             "chords": ", ".join(chords[:10]) + ("..." if len(chords) > 10 else ""), # Show first 10 chords
             "key": key if key else "Unknown",
-            "note": note
+            "note": note,
+            "confidence": confidence
         })
+
+    # Сортируем результаты по уверенности (None уходит в конец)
+    def confidence_sort_key(item):
+        c = item.get("confidence")
+        return (c is None, c if c is not None else float("inf"))
+
+    results.sort(key=confidence_sort_key)
 
     # Generate Markdown Report
     with open(report_file, 'w', encoding='utf-8') as f:

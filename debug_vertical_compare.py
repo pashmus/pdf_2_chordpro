@@ -4,7 +4,7 @@ from pathlib import Path
 
 # Отдельный коэффициент порога для отладчика,
 # чтобы можно было экспериментировать независимо от основного конвертера.
-GAP_THRESHOLD_RATIO = 0.3
+GAP_THRESHOLD_RATIO = 0.20
 
 def get_lines_words(page):
     words = page.get_text("words")

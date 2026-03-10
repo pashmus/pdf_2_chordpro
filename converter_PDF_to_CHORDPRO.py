@@ -20,7 +20,7 @@ CHORD_TOKEN_PATTERN = re.compile(
     r'[A-H](?:b|#)?(?:2|5|m|maj|min|dim|aug|sus|add)?(?:[0-9]{1,2})?(?:/[A-H](?:b|#)?)?'
 )
 CHORD_LINE_RATIO = 0.4
-GAP_THRESHOLD_RATIO = 0.3
+GAP_THRESHOLD_RATIO = 0.32
 WORD_GAP_PT = 2.0
 # Референсные значения для "нормального" шрифта (примерно 10-12pt)
 REFERENCE_CHAR_WIDTH = 6.0  # средняя ширина символа в поинтах для шрифта ~10pt (справочная инфа)
@@ -30,6 +30,39 @@ INDENT_BY_CHORD_LEN = {1: 2, 2: 4, 3: 5, 4: 6, 5: 7}
 INDENT_DEFAULT = 8
 STRUCTURAL_CHARS = frozenset(["//:", "://", "|", "|:", ":|"])
 KEY_CONFIDENCE_THRESHOLD = 0.75
+
+
+def _normalize_chord_for_key_compare(chord_str):
+    """
+    Нормализует аккорд для сравнения с определённой тональностью:
+    - убирает бас после слэша (G/B -> G),
+    - отбрасывает дополнения (7, sus4, add9 и т.п.),
+    - оставляет только тонику + признак минора (m), если он есть.
+    Возвращает строку вида "C", "F#", "Ebm" или None, если распарсить не удалось.
+    """
+    if not chord_str:
+        return None
+
+    s = chord_str.strip().strip("[](){}|.,;:!?")
+    if not s:
+        return None
+
+    # Убираем басовый аккорд
+    s = s.split("/", 1)[0].strip()
+    if not s:
+        return None
+
+    m = re.match(r'^([A-G](?:b|#)?)(.*)$', s)
+    if not m:
+        return None
+
+    root = m.group(1)
+    tail = m.group(2).lower()
+
+    # Минор считаем только если хвост начинается с m/min, но не maj
+    is_minor = tail.startswith("min") or (tail.startswith("m") and not tail.startswith("maj"))
+
+    return root + ("m" if is_minor else "")
 
 
 def _german_to_standard_in_brackets(content):
@@ -182,13 +215,12 @@ def _flush_word_maybe_split_chords(current_word_chars, out_list):
 class PdfToChordProConverter:
     """Конвертирует PDF-файлы песен в формат ChordPro (.cho)."""
 
-    def __init__(self, input_dir="input_pdf", output_dir="output_cho", use_word_mode=False, write_db=False):
+    def __init__(self, input_dir="input_pdf_test", output_dir="output_cho_test", use_word_mode=False, write_db=False):
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.db_manager = DatabaseManager()
         self.parsing_report = []
         self.rule14_report = []
-        self.key_warnings = []
         self.use_word_mode = use_word_mode
         self.write_db = write_db
         self.files_processed = 0
@@ -212,9 +244,6 @@ class PdfToChordProConverter:
         if self.rule14_report:
             with open("rule14_report.txt", "w", encoding="utf-8") as f:
                 f.write("\n".join(self.rule14_report))
-        if self.key_warnings:
-            with open("key_analysis_warnings.txt", "w", encoding="utf-8") as f:
-                f.write("\n".join(self.key_warnings))
 
     def process_all(self):
         if not self.input_dir.exists():
@@ -274,12 +303,31 @@ class PdfToChordProConverter:
         key_str, confidence, note = analyze_key(chords)
 
         if key_str is None:
-            self.key_warnings.append(f"{pdf_path.name}: тональность не определена")
+            self.log_issue("--WARNING--: тональность не определена")
         else:
             if confidence is not None and confidence < KEY_CONFIDENCE_THRESHOLD:
-                self.key_warnings.append(
-                    f"{pdf_path.name}: низкая уверенность ({confidence:.2f}), тональность {key_str}"
+                self.log_issue(
+                    f"--WARNING--: низкая уверенность определения тональности "
+                    f"({confidence:.2f} < {KEY_CONFIDENCE_THRESHOLD:.2f}), тональность {key_str}"
                 )
+
+            # Сверяем с первым аккордом из того же набора, который использовался для анализа тональности.
+            # Сравнение строгое: только точное совпадение после нормализации аккорда.
+            first_chord_normalized = None
+            first_chord_raw = None
+            for c in chords:
+                if c and c.strip():
+                    first_chord_raw = c.strip()
+                    first_chord_normalized = _normalize_chord_for_key_compare(first_chord_raw)
+                    if first_chord_normalized:
+                        break
+
+            if first_chord_normalized and key_str != first_chord_normalized:
+                self.log_issue(
+                    f"--WARNING--: определённая тональность ({key_str}) не совпадает с первым аккордом "
+                    f"из набора анализа ({first_chord_raw} -> {first_chord_normalized})."
+                )
+
             # Вставка {key: ...} после {time: ...} или {tempo: ...} или {title: ...} (как раньше, перед capo)
             key_line = "\n{key: " + key_str + "}"
             if re.search(r'\{time:[^}]+\}', chordpro_content):
