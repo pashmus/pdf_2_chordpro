@@ -1,7 +1,15 @@
+"""
+Утилита: конвертирует .doc в .docx и объединяет все docx-файлы песен в один документ.
+Работает с папкой в корне проекта.
+"""
+
 import os
 import glob
 from docx import Document
 from docxcompose.composer import Composer
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
 # Попытка импорта win32com для конвертации .doc
 try:
@@ -74,7 +82,7 @@ def merge_docx_files():
     output_filename = "!Сборник_всех_песен.docx"
 
     # Пути
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = PROJECT_ROOT
     source_dir = os.path.join(base_dir, folder_name)
     output_path = os.path.join(source_dir, output_filename)
 

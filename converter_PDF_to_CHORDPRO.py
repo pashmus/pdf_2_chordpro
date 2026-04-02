@@ -1,221 +1,54 @@
 """
 Конвертер PDF в ChordPro.
 Извлекает текст и аккорды из PDF и формирует .cho файлы.
+
+Доступные флаги CLI:
+- `-w`, `--words-mode` — включить legacy-режим парсинга на уровне слов.
+- `-db`, `--write-db` — записывать результат в БД (если поле `song.chordpro` пустое).
 """
-import fitz  # PyMuPDF
 import re
-import os
-import argparse
 from pathlib import Path
+
+import fitz  # PyMuPDF
+
+from converter_cli import parse_args
+from converter_processing import (
+    calculate_block_indent,
+    classify_section_start,
+    flush_section,
+    get_line_indent_requirement,
+    merge_chords_and_lyrics,
+    merge_using_chars,
+    merge_using_words,
+    process_comment_block,
+    process_grid_block,
+    process_verse_chorus_block,
+)
+from converter_utils import (
+    CHORD_LINE_RATIO,
+    CHORD_PATTERN,
+    GAP_THRESHOLD_RATIO,
+    KEY_CONFIDENCE_THRESHOLD,
+    STRUCTURAL_CHARS,
+    TOLERANCE_Y,
+    calculate_adaptive_gap_threshold,
+    chars_to_simulated_words,
+    german_to_standard_in_brackets,
+    normalize_chord_for_key_compare,
+    split_chord_word_by_chords,
+)
 from database_manager import DatabaseManager
-from key_analyser import parse_chordpro_content, analyze_key
+from key_analyser import analyze_key, parse_chordpro_content
 
-# --- Константы ---
-TOLERANCE_Y = 3
-CHORD_PATTERN = re.compile(
-    r'^[A-H](?:b|#)?(?:2|5|m|maj|min|dim|aug|sus|add)?(?:[0-9]{1,2})?(?:/[A-H](?:b|#)?)?$'
-)
-# Паттерн одного аккорда без привязки к границам — для поиска первого аккорда в строке
-CHORD_TOKEN_PATTERN = re.compile(
-    r'[A-H](?:b|#)?(?:2|5|m|maj|min|dim|aug|sus|add)?(?:[0-9]{1,2})?(?:/[A-H](?:b|#)?)?'
-)
-CHORD_LINE_RATIO = 0.4
-GAP_THRESHOLD_RATIO = 0.32
-WORD_GAP_PT = 2.0
-# Референсные значения для "нормального" шрифта (примерно 10-12pt)
-REFERENCE_CHAR_WIDTH = 6.0  # средняя ширина символа в поинтах для шрифта ~10pt (справочная инфа)
-REFERENCE_LINE_HEIGHT = 12.0  # средняя высота строки для шрифта ~10pt (используется)
-WORD_GAP_RATIO = 0.3  # относительный порог: разрыв считается границей слова, если он > 30% от ширины символа
-INDENT_BY_CHORD_LEN = {1: 2, 2: 4, 3: 5, 4: 6, 5: 7}
-INDENT_DEFAULT = 8
-STRUCTURAL_CHARS = frozenset(["//:", "://", "|", "|:", ":|"])
-KEY_CONFIDENCE_THRESHOLD = 0.75
-
-
-def _normalize_chord_for_key_compare(chord_str):
-    """
-    Нормализует аккорд для сравнения с определённой тональностью:
-    - убирает бас после слэша (G/B -> G),
-    - отбрасывает дополнения (7, sus4, add9 и т.п.),
-    - оставляет только тонику + признак минора (m), если он есть.
-    Возвращает строку вида "C", "F#", "Ebm" или None, если распарсить не удалось.
-    """
-    if not chord_str:
-        return None
-
-    s = chord_str.strip().strip("[](){}|.,;:!?")
-    if not s:
-        return None
-
-    # Убираем басовый аккорд
-    s = s.split("/", 1)[0].strip()
-    if not s:
-        return None
-
-    m = re.match(r'^([A-G](?:b|#)?)(.*)$', s)
-    if not m:
-        return None
-
-    root = m.group(1)
-    tail = m.group(2).lower()
-
-    # Минор считаем только если хвост начинается с m/min, но не maj
-    is_minor = tail.startswith("min") or (tail.startswith("m") and not tail.startswith("maj"))
-
-    return root + ("m" if is_minor else "")
-
-
-def _german_to_standard_in_brackets(content):
-    """Внутри каждой пары [...] заменяет германскую нотацию на стандартную: H→B, B→Bb."""
-    def replace_inside(m):
-        s = m.group(1)
-        temp = "###TEMP###"
-        s = s.replace("H", temp)
-        s = s.replace("B", "Bb")
-        s = s.replace(temp, "B")
-        return "[" + s + "]"
-    return re.sub(r'\[(.*?)\]', replace_inside, content)
-
-
-def _split_chord_word_by_chords(text):
-    """
-    Разбивает уже полученное «слово» (оно уже разбито по пробелам/разрывам) по границам
-    начала аккордов. Ведущий неаккордный префикс — отдельный фрагмент; каждый аккорд —
-    вместе с символами после него в этом же слове до начала следующего аккорда (часто "|").
-    Например: "|A2" -> ["|", "A2"]; "|A2|E" -> ["|", "A2|", "E"].
-    """
-    if not text:
-        return [text]
-    matches = list(CHORD_TOKEN_PATTERN.finditer(text))
-    if not matches:
-        return [text]
-    parts = []
-    # Ведущий префикс до первого аккорда
-    if matches[0].start() > 0:
-        parts.append(text[: matches[0].start()])
-    for i, m in enumerate(matches):
-        start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        parts.append(text[start:end])
-    return parts
-
-
-def _calculate_adaptive_gap_threshold(chars, line_height):
-    """
-    Вычисляет адаптивный порог разрыва между символами на основе размера шрифта.
-
-    Args:
-        chars: список символов строки
-        line_height: высота строки в поинтах
-
-    Returns:
-        Порог разрыва в поинтах
-    """
-    if not chars:
-        return WORD_GAP_PT
-
-    # Вычисляем среднюю ширину не-пробельных символов
-    char_widths = []
-    for c in chars:
-        if c['char'].strip():  # Пропускаем пробелы
-            width = c['x1'] - c['x0']
-            if width > 0:
-                char_widths.append(width)
-
-    if not char_widths:
-        return WORD_GAP_PT
-
-    # Используем медиану для устойчивости к выбросам
-    char_widths_sorted = sorted(char_widths)
-    median_idx = len(char_widths_sorted) // 2
-    if len(char_widths_sorted) % 2 == 0:
-        avg_char_width = (char_widths_sorted[median_idx - 1] + char_widths_sorted[median_idx]) / 2
-    else:
-        avg_char_width = char_widths_sorted[median_idx]
-
-    # Метод 1: На основе ширины символа (более точный для горизонтальных разрывов)
-    threshold_by_width = avg_char_width * WORD_GAP_RATIO
-
-    # Метод 2: На основе высоты строки (индикатор размера шрифта)
-    threshold_by_height = WORD_GAP_PT * (line_height / REFERENCE_LINE_HEIGHT)
-
-    # Комбинируем оба метода (взвешенное среднее)
-    # Больше веса даём методу по ширине, т.к. он более релевантен для горизонтальных разрывов
-    adaptive_threshold = 0.7 * threshold_by_width + 0.3 * threshold_by_height
-
-    # Ограничиваем снизу и сверху разумными значениями
-    min_threshold = WORD_GAP_PT * 0.5  # Не меньше половины базового
-    max_threshold = WORD_GAP_PT * 5.0  # Не больше 5x базового
-
-    return max(min_threshold, min(adaptive_threshold, max_threshold))
-
-
-def _chars_to_simulated_words(chars, gap_threshold=None):
-    """
-    Собирает из списка символов (chars) «слова» по пробелам и по расстоянию между символами.
-    gap_threshold: порог разрыва в поинтах (если None, используется WORD_GAP_PT)
-    Возвращает список кортежей (x0, y0, x1, y1, text) как в page.get_text("words").
-    """
-    if gap_threshold is None:
-        gap_threshold = WORD_GAP_PT
-
-    words_simulated = []
-    current_word_chars = []
-
-    for i, c in enumerate(chars):
-        is_space = c['char'] == ' '
-        if i > 0 and not is_space:
-            prev_c = chars[i - 1]
-            dist = c['x0'] - prev_c['x1']
-            if dist > gap_threshold:  # Используем переданный порог
-                if current_word_chars:
-                    _flush_word_maybe_split_chords(current_word_chars, words_simulated)
-                    current_word_chars = []
-
-        if is_space:
-            if current_word_chars:
-                _flush_word_maybe_split_chords(current_word_chars, words_simulated)
-                current_word_chars = []
-        else:
-            current_word_chars.append(c)
-
-    if current_word_chars:
-        _flush_word_maybe_split_chords(current_word_chars, words_simulated)
-    return words_simulated
-
-
-def _flush_word(current_word_chars, out_list):
-    """Добавляет текущее «слово» из current_word_chars в out_list в формате (x0,y0,x1,y1,text)."""
-    wx0 = current_word_chars[0]['x0']
-    wy0 = min(ch['y0'] for ch in current_word_chars)
-    wx1 = current_word_chars[-1]['x1']
-    wy1 = max(ch['y1'] for ch in current_word_chars)
-    wtext = "".join(ch['char'] for ch in current_word_chars)
-    out_list.append((wx0, wy0, wx1, wy1, wtext))
-
-
-def _flush_word_maybe_split_chords(current_word_chars, out_list):
-    """
-    Сбрасывает накопленное слово в out_list. Если в слове несколько аккордов — разбивает по границам
-    аккордов и добавляет каждый фрагмент отдельно с реальными координатами из символов.
-    """
-    text = "".join(c['char'] for c in current_word_chars)
-    parts = _split_chord_word_by_chords(text)
-    if len(parts) == 1:
-        _flush_word(current_word_chars, out_list)
-        return
-    idx = 0
-    for part in parts:
-        chunk = current_word_chars[idx : idx + len(part)]
-        idx += len(part)
-        if chunk:
-            _flush_word(chunk, out_list)
+# Директории, которые можно вручную менять перед запуском.
+input_dir = "input_pdf"
+output_dir = "output_cho"
 
 
 class PdfToChordProConverter:
     """Конвертирует PDF-файлы песен в формат ChordPro (.cho)."""
 
-    def __init__(self, input_dir="input_pdf_test", output_dir="output_cho_test", use_word_mode=False, write_db=False):
+    def __init__(self, input_dir=input_dir, output_dir=output_dir, use_word_mode=False, write_db=False):
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.db_manager = DatabaseManager()
@@ -297,7 +130,7 @@ class PdfToChordProConverter:
             all_lines.extend(page_lines)
 
         chordpro_content = self._convert_lines_to_chordpro(all_lines, metadata, pdf_path.name)
-        chordpro_content = _german_to_standard_in_brackets(chordpro_content)
+        chordpro_content = german_to_standard_in_brackets(chordpro_content)
 
         chords = parse_chordpro_content(chordpro_content)
         key_str, confidence, note = analyze_key(chords)
@@ -318,7 +151,7 @@ class PdfToChordProConverter:
             for c in chords:
                 if c and c.strip():
                     first_chord_raw = c.strip()
-                    first_chord_normalized = _normalize_chord_for_key_compare(first_chord_raw)
+                    first_chord_normalized = normalize_chord_for_key_compare(first_chord_raw)
                     if first_chord_normalized:
                         break
 
@@ -508,11 +341,11 @@ class PdfToChordProConverter:
             line_height = line_bottom - line_top
 
             # Вычисляем адаптивный порог для этой строки на основе размера шрифта
-            adaptive_gap_threshold = _calculate_adaptive_gap_threshold(chars, line_height)
+            adaptive_gap_threshold = calculate_adaptive_gap_threshold(chars, line_height)
 
             # Совместимость с check_is_chord_line: «слова» из символов
             # Передаём адаптивный порог в функцию разбиения на слова
-            words_simulated = _chars_to_simulated_words(chars, gap_threshold=adaptive_gap_threshold)
+            words_simulated = chars_to_simulated_words(chars, gap_threshold=adaptive_gap_threshold)
 
             processed_lines.append({
                 'y': y,
@@ -548,7 +381,7 @@ class PdfToChordProConverter:
         for w in line_words:
             wx0, wy0, wx1, wy1 = w[0], w[1], w[2], w[3]
             text = w[4]
-            parts = _split_chord_word_by_chords(text)
+            parts = split_chord_word_by_chords(text)
             if len(parts) == 1:
                 refined.append(w)
                 continue
@@ -744,883 +577,37 @@ class PdfToChordProConverter:
         return "\n".join(output)
 
     def _classify_section_start(self, text):
-        # Returns (type, label) or (None, None)
-        if text.startswith("Intro"): return ('grid', "Intro")
-        if text.startswith("Instrumental") or text.startswith("Instr"): return ('grid', "Instr.")
-        if text.startswith("Outro"): return ('grid', "Outro")
-
-        if re.match(r'^\d+\.', text): return ('verse', re.match(r'^(\d+\.)', text).group(1))
-
-        if "Пр." in text or "Припев" in text:
-            # Check if it has colon
-            return ('chorus', text.split(':')[0] + ":" if ":" in text else text)
-
-        # Rule 9: Normalize Pre-Chorus
-        keywords = ["Пре-припев", "Пред-припев", "Пре-пр", "Пред-пр"]
-        if any(k in text for k in keywords):
-             # If colon exists -> It's a Header -> Normalize to "Пре-пр.X:"
-             if ":" in text:
-                 num_match = re.search(r'(\d+)', text)
-                 num_suffix = f".{num_match.group(1)}" if num_match else "."
-                 normalized_label = f"Пре-пр{num_suffix}:"
-                 return ('chorus', normalized_label)
-             else:
-                 # If NO colon -> It's a Reference -> Return as is (no colon)
-                 return ('chorus', text)
-
-        if "Bridge" in text or "Бридж" in text:
-             return ('bridge', text.split(':')[0] + ":" if ":" in text else text)
-
-        if text.startswith("Tag"): return ('tag', "Tag:")
-        if text.startswith("End"): return ('tag', "End:") # Keep real label for differentiation
-
-        return (None, None)
+        return classify_section_start(text)
 
     def _flush_section(self, section_type, label, lines):
-        if not lines: return []
-
-        if section_type == 'grid':
-            return self._process_grid_block(lines, label)
-
-        if section_type == 'unknown':
-            # Heuristic Rule 17:
-            # If >= 4 lines -> Verse
-            # If < 4 lines -> Comment Block
-            if len(lines) >= 4:
-                return self._process_verse_chorus_block(lines, 'verse', label)
-            else:
-                return self._process_comment_block(lines)
-
-        return self._process_verse_chorus_block(lines, section_type, label)
+        return flush_section(self, section_type, label, lines)
 
     def _process_comment_block(self, lines):
-        output = []
-        # Warning for multiline comments
-        if len(lines) > 1:
-            line_preview = lines[0]['text'][:30] if lines else "Empty"
-            self.log_issue(f"--WARNING--: Обнаружен многострочный блок комментария ({len(lines)} строк): '{line_preview}...'")
-
-        for line in lines:
-            text = line['text'].strip()
-            if text:
-                output.append(f"{{comment: {text}}}")
-        return output
+        return process_comment_block(self, lines)
 
     def _process_grid_block(self, block, label):
-        output = []
-        if not label.endswith(":"): label += ":"
-        output.append(f"{{start_of_grid: {label}}}")
-
-        for line in block:
-            text = line['text']
-            # Clean header from line (e.g. "Intro: | A |" -> "| A |")
-            clean_text = re.sub(r'^(Intro|Instrumental|Instr|Outro|Вступление|Проигрыш|Tag|End|Кода)[:\s]*', '', text, flags=re.IGNORECASE).strip()
-
-            if not clean_text: continue
-
-            # Format
-            formatted = clean_text.replace("//:", "|:").replace("://", ":|")
-            # Replace pipe with space-pipe-space only if NOT preceded by colon (start repeat) AND NOT followed by colon (end repeat)
-            formatted = re.sub(r'(?<!:)\|(?!:)', ' | ', formatted)
-
-            # Normalize spaces around repeat signs
-            formatted = re.sub(r'\|\:\s*', '|: ', formatted)
-            formatted = re.sub(r'\s*\:\|', ' :|', formatted)
-            formatted = re.sub(r'\s+', ' ', formatted).strip()
-
-            output.append(formatted)
-
-        output.append("{end_of_grid}")
-        return output
+        return process_grid_block(block, label)
 
     def _process_verse_chorus_block(self, block, block_type, label_text):
-        output = []
-
-        # Tags
-        start_tag = "{start_of_verse}"
-        end_tag = "{end_of_verse}"
-        is_ref = False
-
-        if label_text:
-            if ":" in label_text:
-                 # Normalize 'End:' to 'Tag:' for output only
-                 display_label = label_text
-                 if display_label.startswith("End:"):
-                     display_label = "Tag:" # Standardize
-
-                 if block_type == 'chorus': start_tag = f"{{start_of_chorus: {display_label}}}"; end_tag = "{end_of_chorus}"
-                 elif block_type == 'bridge': start_tag = f"{{start_of_bridge: {display_label}}}"; end_tag = "{end_of_bridge}"
-                 elif block_type == 'tag': start_tag = f"{{start_of_chorus: {display_label}}}"; end_tag = "{end_of_chorus}"
-            elif re.match(r'^\d+\.', label_text):
-                 start_tag = f"{{start_of_verse: {label_text}}}"
-            else:
-                 is_ref = True
-                 start_tag = f"{{comment: {label_text}}}"
-
-                 # Check if the block has more content (lines) than just the header
-                 content_lines_count = 0
-                 content_lines = []
-                 for l in block:
-                     if l['text'].strip() != label_text.strip():
-                         content_lines_count += 1
-                         content_lines.append(l['text'].strip())
-
-                 if content_lines_count > 0:
-                      header_preview = block[0]['text'].strip() if block else ''
-                      if len(header_preview) > 60:
-                          header_preview = header_preview[:60] + "..."
-                      mismatch_note = " (метка секции отличается от первой строки)" if block and label_text.strip() != block[0]['text'].strip() else ""
-                      self.log_issue(f"--WARNING--: Блок Reference/Comment содержит дополнительный контент ({content_lines_count} строк) помимо заголовка: '{header_preview}'{mismatch_note}")
-
-        output.append(start_tag)
-
-        # If it is a reference, append extra lines as separate comments
-        if is_ref:
-            if 'content_lines' in locals() and content_lines:
-                for line_text in content_lines:
-                    if line_text:
-                        output.append(f"{{comment: {line_text}}}")
-            return output
-
-        # --- Rule 14: Calculate Block Indentation ---
-        block_indent = self._calculate_block_indent(block, filename=self.current_filename if hasattr(self, 'current_filename') else "")
-        # --------------------------------------------
-
-        i = 0
-        while i < len(block):
-            line = block[i]
-            is_chord = line['is_chord_line']
-
-            # Правило: строка с двоеточием и ключевым словом — это заголовок секции из PDF.
-            # Её нельзя выводить как обычный текст (иначе получится дублирование после {start_of_*: ...}),
-            # особенно если display-метка была нормализована/сокращена (например, "Пре-припев 1:" -> "Пре-пр.1:").
-            if label_text and (not is_chord):
-                raw_text = line['text'].strip()
-                if ":" in raw_text:
-                    detected_type, detected_label = self._classify_section_start(raw_text)
-                    if detected_type == block_type and detected_label and (":" in detected_label):
-                        # Если в этой же строке после двоеточия есть текст — оставляем только его.
-                        after_colon = raw_text.split(":", 1)[1].strip()
-                        if after_colon:
-                            output.append(after_colon)
-                        i += 1
-                        continue
-
-            # Check if this line is just the header (e.g. "Пр.1:")
-            if label_text and line['text'].strip() == label_text.strip():
-                i += 1
-                continue
-
-            if is_chord:
-                if i + 1 < len(block):
-                    next_line = block[i+1]
-                    if not next_line['is_chord_line']:
-                        # Merge
-                        merged = self._merge_chords_and_lyrics(line, next_line, label_text, block_indent)
-                        output.append(merged)
-                        i += 2
-                        continue
-                    else:
-                        output.append(self._merge_chords_and_lyrics(line, None, block_indent=block_indent))
-                        i += 1
-                else:
-                    output.append(self._merge_chords_and_lyrics(line, None, block_indent=block_indent))
-                    i += 1
-            else:
-                # Lyric line
-                text = line['text']
-                # Strip label if it's at the start
-                if label_text:
-                     # Remove label from text
-                     clean_text = text.strip()
-                     if clean_text.startswith(label_text):
-                          text = text.replace(label_text, "", 1).strip()
-                     elif label_text == "Tag:" and clean_text.startswith("End:"):
-                          text = text.replace("End:", "", 1).strip()
-
-                # Apply block indent to lyric-only lines too
-                if block_indent > 0:
-                     text = (" " * block_indent) + text.strip()
-
-                output.append(text)
-                i += 1
-
-        output.append(end_tag)
-
-        if block_indent > 0:
-            self.current_song_rule14_sections.append("\n".join(output))
-
-        return output
+        return process_verse_chorus_block(self, block, block_type, label_text)
 
     def _calculate_block_indent(self, block, filename=""):
-        max_indent = 0
-        i = 0
-        while i < len(block):
-            line = block[i]
-            if line['is_chord_line'] and i + 1 < len(block):
-                next_line = block[i+1]
-                if not next_line['is_chord_line']:
-                    # Potential pairing
-                    indent = self._get_line_indent_requirement(line, next_line)
-                    if indent > max_indent:
-                        max_indent = indent
-            i += 1
-        return max_indent
+        return calculate_block_indent(block)
 
     def _get_line_indent_requirement(self, chord_line, lyric_line):
-        # Helper to calculate indent if leading chord exists
-        if not chord_line or not lyric_line: return 0
-
-        c_words = chord_line.get('words', [])
-        l_words = lyric_line.get('words', [])
-
-        if not c_words: return 0
-
-        first_chord_x = c_words[0][0]
-
-        # Determine first lyric text X (ignoring spaces)
-        first_lyric_x = None
-
-        if 'chars' in lyric_line and lyric_line['chars']:
-             for c in lyric_line['chars']:
-                 if c['char'].strip(): # Found non-space char
-                     first_lyric_x = c['x0']
-                     break
-        elif l_words:
-             # Words usually don't contain leading spaces if parsed by pymupdf words
-             first_lyric_x = l_words[0][0]
-
-        if first_lyric_x is None:
-             return 0
-
-        # Правило 14: ведущий аккорд — только если левее текста больше чем на ширину одной буквы (~12 pt)
-        if first_chord_x >= first_lyric_x - 5.0:
-            return 0
-
-        first_chord_end_x = c_words[0][2]
-        # Конец первой буквы текста: по chars точно, иначе приближение по первому слову
-        first_letter_end_x = None
-        if 'chars' in lyric_line and lyric_line['chars']:
-            for c in lyric_line['chars']:
-                if c['char'].strip():
-                    first_letter_end_x = c['x1']
-                    break
-        elif l_words:
-            w0, w2, w4 = l_words[0][0], l_words[0][2], l_words[0][4]
-            n = max(1, len(w4))
-            first_letter_end_x = w0 + (w2 - w0) / n
-
-        if first_letter_end_x is not None and first_chord_end_x >= first_letter_end_x:
-            # Аккорд по смыслу на первой букве (сдвиг в PDF из-за верстки) — правило 14 не применяем
-            return 0
-
-        chord_text = c_words[0][4].strip("[]()|")
-        return INDENT_BY_CHORD_LEN.get(len(chord_text), INDENT_DEFAULT)
+        return get_line_indent_requirement(chord_line, lyric_line)
 
     def _merge_chords_and_lyrics(self, chord_line, lyric_line, label_to_strip="", block_indent=0):
-        # Dispatch to appropriate method
-        if lyric_line and 'chars' in lyric_line:
-            return self._merge_using_chars(chord_line, lyric_line, label_to_strip, block_indent)
-        else:
-            return self._merge_using_words(chord_line, lyric_line, label_to_strip, block_indent)
+        return merge_chords_and_lyrics(chord_line, lyric_line, label_to_strip, block_indent)
 
     def _merge_using_words(self, chord_line, lyric_line, label_to_strip="", block_indent=0):
-        # Original logic (Legacy)
-        chord_words = [list(w) for w in chord_line['words']] if chord_line else []
-        lyric_words = [list(w) for w in lyric_line['words']] if lyric_line else []
-
-        for w in lyric_words:
-            w[4] = w[4].replace("//:", "||:").replace("://", ":||")
-        for w in chord_words:
-            w[4] = w[4].replace("//:", "||:").replace("://", ":||")
-
-        # Strip label
-        if lyric_line and label_to_strip:
-             full_text = lyric_line['text']
-             label_clean = label_to_strip.strip()
-             if full_text.strip().startswith("End:"):
-                 full_text = full_text.replace("End:", "", 1).strip()
-                 if lyric_words and "End" in lyric_words[0][4]:
-                      lyric_words = lyric_words[1:]
-             if full_text.strip().startswith(label_clean):
-                  if lyric_words and (lyric_words[0][4].strip() == label_clean or label_clean in lyric_words[0][4]):
-                       lyric_words = lyric_words[1:]
-                  elif lyric_words and len(lyric_words) > 1 and (lyric_words[0][4] + lyric_words[1][4]).replace(" ", "") == label_clean.replace(" ", ""):
-                       lyric_words = lyric_words[2:]
-
-        # Check for leading chord (правило 14: порог 12 pt ≈ одна буква; не leading, если аккорд заканчивается не раньше конца первой буквы)
-        is_leading = False
-        if chord_words and lyric_words:
-            first_chord_x = chord_words[0][0]
-            first_chord_end_x = chord_words[0][2]
-            first_lyric_x = lyric_words[0][0]
-            w0, w2, w4 = lyric_words[0][0], lyric_words[0][2], lyric_words[0][4]
-            first_letter_end_x = w0 + (w2 - w0) / max(1, len(w4))
-            if first_chord_x < first_lyric_x - 5.0 and first_chord_end_x < first_letter_end_x:
-                is_leading = True
-
-        # Events
-        events = []
-        delayed_chords = []
-
-        for w in lyric_words:
-            events.append({'type': 'lyric', 'x': w[0], 'end': w[2], 'text': w[4]})
-
-        wi = 0
-        while wi < len(chord_words):
-            w = chord_words[wi]
-            raw_text = w[4]
-            x = w[0]
-
-            # --- New Logic: (Chord) without colon => 1. Volt only ---
-            # Try to look ahead if we see an opening parenthesis but not (:
-            is_parenthesized_volt1 = False
-            volt1_content = ""
-            tokens_consumed = 0
-
-            # Check if current token starts with '(' and is NOT '(:'.
-            # Also handle if it is just "("
-            if raw_text.startswith("(") and not raw_text.startswith("(:"):
-                 # Collect tokens until we find a closing parenthesis
-                 temp_content = raw_text
-                 temp_consumed = 0
-
-                 # If the current token itself has the closing parenthesis, e.g. "(E7)"
-                 if ")" in raw_text:
-                     # Check inner content for colon at start (e.g. "(:E") - handled by old logic?
-                     # Old logic checks 'if "(:" in raw_text'.
-                     # If raw_text is "(E7)", no colon.
-                     # If raw_text is "(:E)", old logic catches it later.
-                     # But we must ensure we don't process it here if it is "(:".
-                     # We already checked 'not startswith("(:")'.
-                     # What if it is "( : E)" ? - that would be weird for 2nd volt.
-                     # Assume 2nd volt always starts with (:
-
-                     # We need to verify if it looks like a chord or chord sequence
-                     inner = raw_text[1:].split(")")[0] # take content between ( and )
-                     # If inner starts with :, it's 2nd volt (e.g. "(:E)") -> skip
-                     if not inner.strip().startswith(":"):
-                         is_parenthesized_volt1 = True
-                         volt1_content = inner
-                         tokens_consumed = 0 # No extra tokens consumed, just current one
-                 else:
-                     # Look ahead
-                     found_closing = False
-                     future_content = []
-                     idx_offset = 1
-                     while wi + idx_offset < len(chord_words):
-                         next_w_text = chord_words[wi + idx_offset][4]
-                         future_content.append(next_w_text)
-                         if ")" in next_w_text:
-                             found_closing = True
-                             break
-                         idx_offset += 1
-
-                     if found_closing:
-                         # Join and check
-                         full_group = raw_text + "".join(future_content) # e.g. "(" + "E7)"
-                         # Check if it is a 2nd volt start
-                         # It is 2nd volt if it looks like "(:..."
-                         # We know raw_text is "(" (or starts with it).
-                         # If raw_text is "(" and next is ":E", full is "(:E" -> 2nd volt -> skip
-                         if not full_group.replace(" ", "").startswith("(:"):
-                             is_parenthesized_volt1 = True
-                             # Content inside parens
-                             # find first ( and last )
-                             start_p = full_group.find("(")
-                             end_p = full_group.rfind(")")
-                             if start_p != -1 and end_p != -1:
-                                 volt1_content = full_group[start_p+1 : end_p].strip()
-                                 tokens_consumed = idx_offset
-
-            if is_parenthesized_volt1:
-                # Первая вольта: [(1.] отодвигаем влево на два символа
-                target_x_for_volt1 = x - 10.0
-                if lyric_words:
-                     # Try to align with text if possible, similar to logic below
-                     # (omitted for brevity, using simple offset or logic from char mode if available)
-                     # In word mode we don't have precise char coords easily,
-                     # but let's try to use the start of the current word x
-                     pass
-
-                events.append({'type': 'chord', 'x': target_x_for_volt1, 'text': "[(1.]"})
-
-                # Разбиваем содержимое первой вольты по границам аккордов (напр. "|D7" -> ["|", "D7"])
-                # чтобы символы типа "|" были в отдельных блоках, как в остальных местах
-                volt1_parts = _split_chord_word_by_chords(volt1_content)
-                for idx, part in enumerate(volt1_parts):
-                    if idx == len(volt1_parts) - 1:
-                        events.append({'type': 'chord', 'x': x, 'text': f"[{part})]"})
-                    else:
-                        events.append({'type': 'chord', 'x': x, 'text': f"[{part}]"})
-
-                wi += 1 + tokens_consumed
-                continue
-
-            if "(:" in raw_text:
-                parts = raw_text.split("(:", 1)
-                first_chord = parts[0].strip()
-                remainder = parts[1]
-
-                # Сбор полного текста второй вольты (до первой ")"), если разбито на несколько слов
-                if ")" in remainder:
-                    volt2_content_raw = remainder.split(")")[0].rstrip(")").strip()
-                else:
-                    volt2_content_raw = remainder.strip()
-                    wi += 1
-                    while wi < len(chord_words):
-                        next_w = chord_words[wi]
-                        next_text = next_w[4]
-                        if ")" in next_text:
-                            volt2_content_raw += " " + next_text.split(")")[0].rstrip(")").strip()
-                            break
-                        else:
-                            volt2_content_raw += " " + next_text.strip()
-                        wi += 1
-                second_content = volt2_content_raw
-
-                # --- 1. Первая вольта (1. ---
-                # Если есть текст перед (:, то это первая вольта
-                if first_chord:
-                    # Первая вольта: [(1.] отодвигаем влево на два символа (как в CHARS)
-                    x_volt1 = x - 10.0
-                    if lyric_words:
-                        for lw in lyric_words:
-                            l_start, l_end = lw[0], lw[2]
-                            if l_start <= x <= l_end:
-                                L = len(lw[4])
-                                if L > 0:
-                                    char_width = (l_end - l_start) / L
-                                    x_volt1 = x - 2 * char_width
-                                break
-                    events.append({'type': 'chord', 'x': x_volt1, 'text': "[(1.]"})
-                    # Разбиваем first_chord по границам аккордов (напр. "|D7" -> ["|", "D7"])
-                    first_volt_parts = _split_chord_word_by_chords(first_chord)
-                    for idx, part in enumerate(first_volt_parts):
-                        if idx == len(first_volt_parts) - 1:
-                            events.append({'type': 'chord', 'x': x, 'text': f"[{part})]"})
-                        else:
-                            events.append({'type': 'chord', 'x': x, 'text': f"[{part}]"})
-
-                # Вторая вольта — в delayed_chords
-                raw_tokens = re.split(r'(?<!/)(?=[A-H])', second_content)
-                blocks = []
-                current_block_content = "(2."
-                for token in raw_tokens:
-                    if not token: continue
-                    if token[0] in "ABCDEFGH":
-                        blocks.append(current_block_content)
-                        current_block_content = token
-                    else:
-                        current_block_content += token
-                blocks.append(current_block_content)
-                volt2_parts = []
-                for idx, b in enumerate(blocks):
-                    s = b.strip()
-                    if idx == len(blocks) - 1:
-                        volt2_parts.append(f"[{s})]")
-                    else:
-                        volt2_parts.append(f"[{s}]")
-                delayed_chords.extend(volt2_parts)
-                wi += 1
-            else:
-                # Разбиваем слово по границам аккордов (напр. "|A2|E" -> ["|", "A2|", "E"])
-                parts = _split_chord_word_by_chords(raw_text)
-                for part in parts:
-                    events.append({'type': 'chord', 'x': x, 'text': f"[{part}]"})
-                wi += 1
-
-        events.sort(key=lambda e: e['x'])
-
-        if not lyric_words:
-             line_str = (" " * block_indent) + " ".join([e['text'] for e in events if e['type']=='chord'])
-             if delayed_chords: line_str += "".join(delayed_chords)
-             return line_str
-
-        combined_text = ""
-        chord_queue = [e for e in events if e['type'] == 'chord']
-
-        # Handling leading chord specifically
-        if is_leading and chord_queue:
-             # Take the first chord (leading)
-             c = chord_queue.pop(0)
-             combined_text += c['text']
-
-             # Add block_indent after the chord (Rule 14 fix for WORDS mode)
-             combined_text += " " * block_indent
-
-             if not combined_text.endswith(" "): combined_text += " "
-
-        for w in lyric_words:
-            w_start = w[0]
-            w_end = w[2]
-            w_text = w[4]
-
-            while chord_queue and chord_queue[0]['x'] < w_start:
-                c = chord_queue.pop(0)
-                combined_text += c['text']
-                if not combined_text.endswith(" "): combined_text += " "
-
-            inserts = []
-            while chord_queue and chord_queue[0]['x'] >= w_start and chord_queue[0]['x'] <= w_end:
-                 c = chord_queue.pop(0)
-                 rel = (c['x'] - w_start) / (w_end - w_start)
-                 idx = int(round(len(w_text) * rel))
-                 inserts.append((idx, c['text']))
-
-            # Части одного «слова» аккордов имеют один x → один idx; объединяем в один блок, чтобы порядок сохранился
-            by_idx = {}
-            for idx, txt in inserts:
-                by_idx.setdefault(idx, []).append(txt)
-            inserts = [(idx, "".join(texts)) for idx, texts in by_idx.items()]
-
-            inserts.sort(key=lambda x: x[0], reverse=True)
-            for idx, txt in inserts:
-                w_text = w_text[:idx] + txt + w_text[idx:]
-
-            combined_text += w_text + " "
-
-        # Оставшиеся аккорды (после последнего слова) — без пробелов между блоками
-        combined_text = combined_text.rstrip()
-        while chord_queue:
-            c = chord_queue.pop(0)
-            combined_text += c['text']
-
-        if delayed_chords:
-             combined_text = combined_text.rstrip()  # убрать пробел перед второй вольтой
-             combined_text += "".join(delayed_chords)
-
-        if is_leading:
-            return combined_text.strip()
-        else:
-            return (" " * block_indent) + combined_text.strip()
+        return merge_using_words(chord_line, lyric_line, label_to_strip, block_indent)
 
     def _merge_using_chars(self, chord_line, lyric_line, label_to_strip="", block_indent=0):
-        # NEW logic using character precision
-
-        # 1. Сначала готовим символы текста (lyric_chars), так как они нужны для расчета вольты
-        lyric_chars = []
-        if lyric_line and 'chars' in lyric_line:
-             lyric_chars = lyric_line['chars']
-
-        # Пропускаем пробелы в начале, чтобы избежать двойного отступа
-        start_idx = 0
-        for i, c in enumerate(lyric_chars):
-            if c['char'].strip():
-                start_idx = i
-                break
-        else:
-            if lyric_chars: start_idx = len(lyric_chars)
-
-        lyric_chars = lyric_chars[start_idx:]
-
-        # Логика удаления метки (Label stripping)
-        if label_to_strip:
-             clean_label = label_to_strip.strip()
-             matched_idx = -1
-             temp_str = ""
-             for i, c in enumerate(lyric_chars):
-                 if c['char'].strip() == "": continue
-                 temp_str += c['char']
-                 if temp_str == clean_label or temp_str.startswith(clean_label):
-                     matched_idx = i
-                     break
-                 if len(temp_str) > len(clean_label) + 5: break
-
-             if matched_idx >= 0:
-                 lyric_chars = lyric_chars[matched_idx+1:]
-                 while lyric_chars and not lyric_chars[0]['char'].strip():
-                     lyric_chars.pop(0)
-
-        # Определяем, есть ли на ЭТОЙ строке настоящий «лидирующий» аккорд — уже ПОСЛЕ обрезки метки
-        is_line_leading = False
-        if block_indent > 0 and chord_line and lyric_chars:
-            c_words = chord_line.get('words', [])
-            if c_words:
-                first_chord_x = c_words[0][0]
-                first_chord_end_x = c_words[0][2]
-
-                # Первая видимая буква реального текста (без Bridge:/Tag: и т.п.)
-                first_lyric_x = None
-                first_letter_end_x = None
-                for c in lyric_chars:
-                    if c['char'].strip():
-                        first_lyric_x = c['x0']
-                        first_letter_end_x = c['x1']
-                        break
-
-                if first_lyric_x is not None:
-                    # Как в _get_line_indent_requirement:
-                    # аккорд «ведущий», только если он заметно левее текста
-                    # и заканчивается раньше конца первой буквы
-                    if first_chord_x < first_lyric_x - 5.0 and first_chord_end_x < first_letter_end_x:
-                        is_line_leading = True
-
-        # 2. Теперь готовим аккорды
-        chord_words = [list(w) for w in chord_line['words']] if chord_line else []
-        for w in chord_words:
-            w[4] = w[4].replace("//:", "||:").replace("://", ":||")
-
-        chord_events = []
-        delayed_chords = []
-
-        wi = 0
-        while wi < len(chord_words):
-            w = chord_words[wi]
-            raw_text = w[4]
-            x = w[0]
-            formatted_chord = ""
-
-            # --- New Logic: (Chord) without colon => 1. Volt only ---
-            is_parenthesized_volt1 = False
-            volt1_content = ""
-            tokens_to_skip = 0
-
-            # 1. Check start
-            if raw_text.startswith("(") and not raw_text.startswith("(:"):
-                 # Case A: Closing paren is inside this same token
-                 if ")" in raw_text:
-                     # It's fully contained e.g. "(E7)"
-                     # We need to extract what is inside parens.
-                     # raw_text could be "(E7)" or "(A2)" etc.
-                     inner_parts = raw_text.split("(", 1)[1].split(")", 1)
-                     if inner_parts:
-                        inner = inner_parts[0].strip()
-                        # If inner starts with colon, it is 2nd volt (handled elsewhere usually, but just in case)
-                        if not inner.startswith(":"):
-                            is_parenthesized_volt1 = True
-                            volt1_content = inner
-                            tokens_to_skip = 0
-
-                 # Case B: Closing paren is in a future token
-                 else:
-                     collected_text = raw_text
-                     temp_skip = 0
-                     found_closing = False
-
-                     # Look ahead at next tokens
-                     idx = 1
-                     while wi + idx < len(chord_words):
-                         next_w = chord_words[wi + idx]
-                         next_text = next_w[4]
-                         collected_text += next_text
-                         temp_skip += 1
-                         if ")" in next_text:
-                             found_closing = True
-                             break
-                         idx += 1
-
-                     if found_closing:
-                         # Now we have the full text like "(E7)" or "( A )"
-                         # Extract content between first '(' and first ')' after it
-                         start_p = collected_text.find("(")
-                         end_p = collected_text.find(")", start_p)
-
-                         if start_p != -1 and end_p != -1:
-                             inner_full = collected_text[start_p+1 : end_p].strip()
-
-                             # Check if it looks like a 2nd volt "(:..."
-                             if not inner_full.startswith(":"):
-                                 is_parenthesized_volt1 = True
-                                 volt1_content = inner_full
-                                 tokens_to_skip = temp_skip
-
-            if is_parenthesized_volt1:
-                # Разбиваем содержимое первой вольты по границам аккордов (напр. "|D7" -> ["|", "D7"])
-                # чтобы символы типа "|" были в отдельных блоках, как в остальных местах
-                volt1_parts = _split_chord_word_by_chords(volt1_content)
-
-                # Logic for x_volt1 (copied from below)
-                target_x_for_volt1 = x - 10.0
-                if lyric_chars:
-                    closest_char_idx = -1
-                    min_dist = float('inf')
-                    for ci, c in enumerate(lyric_chars):
-                        dist = abs(c['x0'] - x)
-                        if dist < min_dist:
-                            min_dist = dist
-                            closest_char_idx = ci
-                    if closest_char_idx != -1:
-                        target_idx = closest_char_idx - 2
-                        if target_idx >= 0:
-                            target_x_for_volt1 = lyric_chars[target_idx]['x0']
-                        elif target_idx == -1:
-                            if lyric_chars:
-                                w_char = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
-                                target_x_for_volt1 = lyric_chars[0]['x0'] - w_char
-                        else:
-                            if lyric_chars:
-                                w_char = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
-                                target_x_for_volt1 = lyric_chars[0]['x0'] - (2 * w_char)
-
-                chord_events.append({'x': target_x_for_volt1, 'text': "[(1.]"})
-                for idx, part in enumerate(volt1_parts):
-                    if idx == len(volt1_parts) - 1:
-                        chord_events.append({'x': x, 'text': f"[{part})]"})
-                    else:
-                        chord_events.append({'x': x, 'text': f"[{part}]"})
-                wi += 1 + tokens_to_skip
-                continue
-
-            if "(:" in raw_text:
-                parts = raw_text.split("(:", 1)
-                pre_text = parts[0].strip()
-                remainder = parts[1]
-
-                # Сбор полного текста второй вольты (до первой ")"), если разбито на несколько слов
-                if ")" in remainder:
-                    volt2_content_raw = remainder.split(")")[0].rstrip(")").strip()
-                else:
-                    volt2_content_raw = remainder.strip()
-                    wi += 1
-                    while wi < len(chord_words):
-                        next_w = chord_words[wi]
-                        next_text = next_w[4]
-                        if ")" in next_text:
-                            volt2_content_raw += " " + next_text.split(")")[0].rstrip(")").strip()
-                            break
-                        else:
-                            volt2_content_raw += " " + next_text.strip()
-                        wi += 1
-                second_content = volt2_content_raw
-
-                # --- 1. Первая вольта (1. ---
-                if pre_text:
-                    target_x_for_volt1 = x - 10.0
-                    if lyric_chars:
-                        closest_char_idx = -1
-                        min_dist = float('inf')
-                        for ci, c in enumerate(lyric_chars):
-                            dist = abs(c['x0'] - x)
-                            if dist < min_dist:
-                                min_dist = dist
-                                closest_char_idx = ci
-                        if closest_char_idx != -1:
-                            target_idx = closest_char_idx - 2
-                            if target_idx >= 0:
-                                target_x_for_volt1 = lyric_chars[target_idx]['x0']
-                            elif target_idx == -1:
-                                if lyric_chars:
-                                    w_char = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
-                                    target_x_for_volt1 = lyric_chars[0]['x0'] - w_char
-                            else:
-                                if lyric_chars:
-                                    w_char = lyric_chars[0]['x1'] - lyric_chars[0]['x0']
-                                    target_x_for_volt1 = lyric_chars[0]['x0'] - (2 * w_char)
-
-                    # Аккорд в том же слове что и "(:"
-                    chord_events.append({'x': target_x_for_volt1, 'text': "[(1.]"})
-                    # Разбиваем pre_text по границам аккордов (напр. "|D7" -> ["|", "D7"])
-                    first_volt_parts = _split_chord_word_by_chords(pre_text)
-                    for idx, part in enumerate(first_volt_parts):
-                        if idx == len(first_volt_parts) - 1:
-                            chord_events.append({'x': x, 'text': f"[{part})]"})
-                        else:
-                            chord_events.append({'x': x, 'text': f"[{part}]"})
-
-                # --- 2. Вторая вольта (2. ---
-                raw_tokens = re.split(r'(?<!/)(?=[A-H])', second_content)
-                blocks = []
-                current_block_content = "(2."
-                for token in raw_tokens:
-                    if not token: continue
-                    is_chord_start = token[0] in "ABCDEFGH"
-                    if is_chord_start:
-                        blocks.append(current_block_content)
-                        current_block_content = token
-                    else:
-                        current_block_content += token
-                blocks.append(current_block_content)
-                volt2_parts = []
-                for idx, b in enumerate(blocks):
-                    s = b.strip()
-                    if idx == len(blocks) - 1:
-                        volt2_parts.append(f"[{s})]")
-                    else:
-                        volt2_parts.append(f"[{s}]")
-                delayed_chords.extend(volt2_parts)
-                wi += 1
-                continue
-
-            # Разбиваем слово по границам аккордов (напр. "|A2|E" -> ["|", "A2|", "E"])
-            parts = _split_chord_word_by_chords(raw_text)
-            for part in parts:
-                chord_events.append({'x': x, 'text': f"[{part}]"})
-            wi += 1
-
-        chord_events.sort(key=lambda e: e['x'])
-
-        if not lyric_chars:
-             # Если текста нет, возвращаем только аккорды
-             result_str = ""
-             for ch in chord_events:
-                 result_str += ch['text']
-             final_res = (" " * block_indent) + result_str
-             if delayed_chords: final_res += "".join(delayed_chords)
-             return final_res.replace("//:", "||:").replace("://", ":||")
-
-        # 3. Слияние (Merge Logic)
-        result_str = ""
-        processed_chords = [False] * len(chord_events)
-        indent_inserted = False
-
-        for i, c in enumerate(lyric_chars):
-            c_center = (c['x0'] + c['x1']) / 2
-            c_start = c['x0']
-
-            # Вставляем аккорды перед символом
-            for ch_i, chord in enumerate(chord_events):
-                if processed_chords[ch_i]: continue
-
-                should_insert = False
-                if chord['x'] < c_start:
-                    should_insert = True
-                elif chord['x'] >= c_start and chord['x'] < c['x1']:
-                    if chord['x'] < c_center:
-                         should_insert = True
-
-                if should_insert:
-                    result_str += chord['text']
-                    processed_chords[ch_i] = True
-
-            # Вставляем отступ
-            # Для строк с настоящим «лидирующим» аккордом отступ вставляем перед первой буквой (Rule 14).
-            # Для остальных строк (как в режиме WORDS) отступ будет добавлен один раз ко всей строке в конце.
-            if is_line_leading and not indent_inserted:
-                result_str += " " * block_indent
-                indent_inserted = True
-
-            # Умный пробел
-            if i > 0:
-                prev_c = lyric_chars[i-1]
-                dist = c_start - prev_c['x1']
-                if dist > 2.0 and c['char'] != ' ' and prev_c['char'] != ' ':
-                     result_str += " "
-
-            result_str += c['char']
-
-        # Добавляем оставшиеся аккорды (после последней буквы — без пробелов между блоками)
-        result_str = result_str.rstrip()
-        for ch_i, chord in enumerate(chord_events):
-            if not processed_chords[ch_i]:
-                result_str += chord['text']
-
-        if delayed_chords:
-             result_str = result_str.rstrip()  # убрать пробел перед второй вольтой
-             result_str += "".join(delayed_chords)
-
-        # Если отступ ещё не был вставлен внутри строки (нет лидирующего аккорда),
-        # добавляем его один раз ко всей строке — как делает режим WORDS.
-        if not indent_inserted and block_indent > 0:
-             result_str = (" " * block_indent) + result_str
-
-        return result_str.rstrip().replace("//:", "||:").replace("://", ":||")
+        return merge_using_chars(chord_line, lyric_line, label_to_strip, block_indent)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert PDF to ChordPro")
-    parser.add_argument("-w", "--words-mode", action="store_true", help="Use legacy word-level parsing (no space detection)")
-    parser.add_argument("-db", "--write-db", action="store_true", help="Записывать chordpro в БД (поле song.chordpro только если NULL). Без флага — только .cho файлы.")
-    args = parser.parse_args()
+    args = parse_args()
 
     converter = PdfToChordProConverter(use_word_mode=args.words_mode, write_db=args.write_db)
     converter.process_all()
