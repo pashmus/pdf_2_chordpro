@@ -7,7 +7,7 @@ import re
 from converter_utils import INDENT_BY_CHORD_LEN, INDENT_DEFAULT, split_chord_word_by_chords
 
 
-def classify_section_start(text):
+def classify_section_start(text, rbc_mode=False):
     """Классифицирует старт секции и возвращает `(type, label)`."""
     if text.startswith("Intro"):
         return ("grid", "Intro")
@@ -16,11 +16,22 @@ def classify_section_start(text):
     if text.startswith("Outro"):
         return ("grid", "Outro")
 
+    if rbc_mode:
+        if text.startswith("Вступление"):
+            return ("grid", "Intro")
+        if text.startswith("Проигрыш"):
+            return ("grid", "Instr.")
+        verse_rbc_match = re.match(r"^Куплет\s*(\d+)\s*:", text, flags=re.IGNORECASE)
+        if verse_rbc_match:
+            return ("verse", f"{verse_rbc_match.group(1)}.")
+
     verse_match = re.match(r"^(\d+\.)", text)
     if verse_match:
         return ("verse", verse_match.group(1))
 
     if "Пр." in text or "Припев" in text:
+        if rbc_mode and text.strip().startswith("Припев"):
+            return ("chorus", "Пр.:")
         return ("chorus", text.split(":")[0] + ":" if ":" in text else text)
 
     keywords = ["Пре-припев", "Пред-припев", "Пре-пр", "Пред-пр"]
@@ -43,7 +54,7 @@ def classify_section_start(text):
     return (None, None)
 
 
-def flush_section(converter, section_type, label, lines):
+def flush_section(converter, section_type, label, lines, rbc_mode=False):
     """Сбрасывает накопленную секцию в ChordPro-строки."""
     if not lines:
         return []
@@ -53,10 +64,10 @@ def flush_section(converter, section_type, label, lines):
 
     if section_type == "unknown":
         if len(lines) >= 4:
-            return process_verse_chorus_block(converter, lines, "verse", label)
+            return process_verse_chorus_block(converter, lines, "verse", label, rbc_mode=rbc_mode)
         return process_comment_block(converter, lines)
 
-    return process_verse_chorus_block(converter, lines, section_type, label)
+    return process_verse_chorus_block(converter, lines, section_type, label, rbc_mode=rbc_mode)
 
 
 def process_comment_block(converter, lines):
@@ -105,7 +116,7 @@ def process_grid_block(block, label):
     return output
 
 
-def process_verse_chorus_block(converter, block, block_type, label_text):
+def process_verse_chorus_block(converter, block, block_type, label_text, rbc_mode=False):
     """Обрабатывает куплет/припев/бридж/тэг блок."""
     output = []
 
@@ -174,8 +185,10 @@ def process_verse_chorus_block(converter, block, block_type, label_text):
         if label_text and (not is_chord):
             raw_text = line["text"].strip()
             if ":" in raw_text:
-                detected_type, detected_label = classify_section_start(raw_text)
-                if detected_type == block_type and detected_label and (":" in detected_label):
+                detected_type, detected_label = classify_section_start(raw_text, rbc_mode=rbc_mode)
+                if detected_type == block_type and detected_label and (
+                    ":" in detected_label or re.match(r"^\d+\.$", detected_label)
+                ):
                     after_colon = raw_text.split(":", 1)[1].strip()
                     if after_colon:
                         output.append(after_colon)
@@ -207,6 +220,8 @@ def process_verse_chorus_block(converter, block, block_type, label_text):
                     text = text.replace(label_text, "", 1).strip()
                 elif label_text == "Tag:" and clean_text.startswith("End:"):
                     text = text.replace("End:", "", 1).strip()
+                elif rbc_mode and block_type == "verse":
+                    text = re.sub(r"^\s*Куплет\s*\d+\s*:\s*", "", text, flags=re.IGNORECASE)
 
             if block_indent > 0:
                 text = (" " * block_indent) + text.strip()

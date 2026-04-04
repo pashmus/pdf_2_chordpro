@@ -20,4 +20,10 @@ def parse_args():
         action="store_true",
         help="Записывать chordpro в БД (поле song.chordpro только если NULL). Без флага — только .cho файлы.",
     )
+    parser.add_argument(
+        "-rbc",
+        "--rbc",
+        action="store_true",
+        help="Включить режим обработки RBC-оформления (заголовки секций и нотация).",
+    )
     return parser.parse_args()

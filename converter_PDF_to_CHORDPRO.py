@@ -5,6 +5,7 @@
 Доступные флаги CLI:
 - `-w`, `--words-mode` — включить legacy-режим парсинга на уровне слов.
 - `-db`, `--write-db` — записывать результат в БД (если поле `song.chordpro` пустое).
+- `-rbc`, `--rbc` — включить обработку файлов RBC-формата.
 """
 import re
 from pathlib import Path
@@ -48,7 +49,7 @@ output_dir = "output_cho"
 class PdfToChordProConverter:
     """Конвертирует PDF-файлы песен в формат ChordPro (.cho)."""
 
-    def __init__(self, input_dir=input_dir, output_dir=output_dir, use_word_mode=False, write_db=False):
+    def __init__(self, input_dir=input_dir, output_dir=output_dir, use_word_mode=False, write_db=False, rbc_mode=False):
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.db_manager = DatabaseManager()
@@ -56,6 +57,7 @@ class PdfToChordProConverter:
         self.rule14_report = []
         self.use_word_mode = use_word_mode
         self.write_db = write_db
+        self.rbc_mode = rbc_mode
         self.files_processed = 0
         self.db_updated_count = 0
 
@@ -93,6 +95,8 @@ class PdfToChordProConverter:
             self.log("Режим: WORDS (Классический)")
         else:
             self.log("Режим: CHARS (Высокая точность)")
+        if self.rbc_mode:
+            self.log("RBC-режим: включён")
 
         self.files_processed = 0
         self.db_updated_count = 0
@@ -130,7 +134,10 @@ class PdfToChordProConverter:
             all_lines.extend(page_lines)
 
         chordpro_content = self._convert_lines_to_chordpro(all_lines, metadata, pdf_path.name)
-        chordpro_content = german_to_standard_in_brackets(chordpro_content)
+        # В обычном режиме ожидаем германскую нотацию на входе и приводим к стандартной.
+        # В RBC-режиме вход уже в стандартной нотации, поэтому преобразование не применяем.
+        if not self.rbc_mode:
+            chordpro_content = german_to_standard_in_brackets(chordpro_content)
 
         chords = parse_chordpro_content(chordpro_content)
         key_str, confidence, note = analyze_key(chords)
@@ -577,10 +584,10 @@ class PdfToChordProConverter:
         return "\n".join(output)
 
     def _classify_section_start(self, text):
-        return classify_section_start(text)
+        return classify_section_start(text, rbc_mode=self.rbc_mode)
 
     def _flush_section(self, section_type, label, lines):
-        return flush_section(self, section_type, label, lines)
+        return flush_section(self, section_type, label, lines, rbc_mode=self.rbc_mode)
 
     def _process_comment_block(self, lines):
         return process_comment_block(self, lines)
@@ -589,7 +596,7 @@ class PdfToChordProConverter:
         return process_grid_block(block, label)
 
     def _process_verse_chorus_block(self, block, block_type, label_text):
-        return process_verse_chorus_block(self, block, block_type, label_text)
+        return process_verse_chorus_block(self, block, block_type, label_text, rbc_mode=self.rbc_mode)
 
     def _calculate_block_indent(self, block, filename=""):
         return calculate_block_indent(block)
@@ -609,5 +616,9 @@ class PdfToChordProConverter:
 if __name__ == "__main__":
     args = parse_args()
 
-    converter = PdfToChordProConverter(use_word_mode=args.words_mode, write_db=args.write_db)
+    converter = PdfToChordProConverter(
+        use_word_mode=args.words_mode,
+        write_db=args.write_db,
+        rbc_mode=args.rbc,
+    )
     converter.process_all()
